@@ -1,0 +1,16 @@
+import numpy as np
+import h5py
+a = np.random.random(size=(100,20)).astype(np.float32) 
+b = np.random.random(size=(20,20)).astype(np.float32) 
+print(a.dtype)
+h5f = h5py.File('data.h5', 'w')
+h5f.create_dataset('dataset_1', data=a)
+h5f.create_dataset('dataset_2', data=b)
+h5f.close()
+
+h5f = h5py.File('data.h5','r')
+b = h5f['dataset_1'][:]
+print(type(b))
+h5f.close()
+
+np.allclose(a,b)
