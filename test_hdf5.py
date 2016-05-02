@@ -10,7 +10,6 @@ h5f.close()
 
 h5f = h5py.File('data.h5','r')
 b = h5f['dataset_1'][:]
-print(type(b))
 h5f.close()
 
 np.allclose(a,b)
