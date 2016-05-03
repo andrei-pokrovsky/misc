@@ -8,7 +8,7 @@ cudnn_context = libcudnn.cudnnCreate()
 
 
 print(libcudnn.cudnnGetVersion())
-exit(0)
+# exit(0)
 
 # Set some options and tensor dimensions
 tensor_format = libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']
