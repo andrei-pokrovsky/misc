@@ -24,15 +24,16 @@ def benchmark_conv(kw, kh, bsz):
     def start_bench():
         start.record()
 
-    def end_bench(op):
+    def end_bench():
         end.record()
         end.synchronize()
         return end.time_since(start)
     n_input = bsz
+
     filters_in = 3
-    filters_out = 32
-    height_in = 256
-    width_in = 256
+    filters_out = 64
+    height_in = 224
+    width_in = 224
     height_filter = kh
     width_filter = kw
     pad_h = 3
@@ -103,7 +104,7 @@ def benchmark_conv(kw, kh, bsz):
             filters_desc, filters_data, conv_desc, algo, ws_data, ws_size.value, beta,
             Y_desc, Y_data)
 
-    ms = end_bench("fprop")
+    ms = end_bench()
 
     ws_ptr = None
     libcudnn.cudnnDestroyTensorDescriptor(X_desc)
@@ -117,7 +118,7 @@ def benchmark_conv(kw, kh, bsz):
     # for kh in range(1, 11):
         # ms = benchmark_conv(kw, kh)
         # print("%dx%d : %fms" % (kw, kh, ms))
-for bsz in range(1, 33):
+for bsz in range(1, 32):
     ms = benchmark_conv(11, 11, bsz)
     print("%d : %.2fms => %f img/sec" % (bsz, ms, bsz/ms))
 # Clean up
