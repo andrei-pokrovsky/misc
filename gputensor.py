@@ -4,10 +4,23 @@ from pycuda import gpuarray
 import libcudnn, ctypes
 
 
-class Tensor_Desc:
-    def __init__(self, shape, dtype, fmt):
-        self.desc = libcudnn.cudnnCreateTensorDescriptor()
-    pass
+class TensorDesc:
+    def __init__(self, shape, dtype, fmt=libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']):
+        self.ptr = libcudnn.cudnnCreateTensorDescriptor()
+
+        libcudnn.cudnnSetTensor4dDescriptor(self.ptr, fmt, dtype,
+                shape[0], shape[1], shape[2], shape[3])
+
+
+    def get(self):
+        return libcudnn.cudnnGetTensor4dDescriptor(self.ptr)
+    def __str__(self):
+        elems = self.get() 
+        return "Tensor: dtype=%s, shape=(%d,%d,%d,%d), strides=(%d,%d,%d,%d)" % elems
+
+    @property
+    def shape(self):
+        return self.get()[1:5]
 
 class FilterDesc:
     pass
@@ -53,7 +66,8 @@ class GPUTensor(gpuarray.GPUArray):
         return ctypes.c_void_p(int(self.gpudata))
 
     def get_cudnn_tensor_desc(self):
-        desc = libcudnn.cudnnCreateTensorDescriptor()
-        libcudnn.cudnnSetTensor4dDescriptor(desc, self.tensor_format, self.get_cudnn_datatype(),
-                self.shape[0], self.shape[1], self.shape[2], self.shape[3])
-        return desc
+        # desc = libcudnn.cudnnCreateTensorDescriptor()
+        # libcudnn.cudnnSetTensor4dDescriptor(desc, self.tensor_format, self.get_cudnn_datatype(),
+                # self.shape[0], self.shape[1], self.shape[2], self.shape[3])
+        # return desc
+        return TensorDesc(self.shape, self.get_cudnn_datatype())

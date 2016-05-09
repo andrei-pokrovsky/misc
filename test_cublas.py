@@ -16,6 +16,30 @@ def gpu_tensor_gemm(handle, a, b):
     cublas_dot.cublas_gemm(handle, a, b, c)
     return c
 
+
+a = np.load("a.npy")
+b = np.load("b.npy")
+print(np.isnan(a).any())
+print(np.isnan(b).any())
+
+c = np.dot(a,b)
+print(b)
+print("A:", a.shape, a.dtype)
+print("B:", b.shape, b.dtype)
+print("C:", c.shape, c.dtype)
+
+ad = gpuarray.to_gpu(a)
+bd = gpuarray.to_gpu(b)
+cd = gpu_tensor_gemm(cbh, ad, bd)
+
+c2 = cd.get()
+print("C2:", c2.shape)
+print(np.allclose(c, c2, atol=0.00005, equal_nan=True))
+print(c)
+print(c2)
+exit(0)
+
+
 for i in range(100):
 
     m = np.random.randint(1,1024)

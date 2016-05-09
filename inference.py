@@ -110,9 +110,10 @@ class Convolution(SlidingLayer):
         if self.conv_desc:
             libcudnn.cudnnDestroyConvolutionDescriptor(self.conv_desc)
 
-        self.in_desc = libcudnn.cudnnCreateTensorDescriptor()
-        libcudnn.cudnnSetTensor4dDescriptor(self.in_desc, tensor_format, data_type,
-                in_images, in_channels, in_height, in_width)
+        self.in_desc = input.get_cudnn_tensor_desc()
+        # libcudnn.cudnnCreateTensorDescriptor()
+        # libcudnn.cudnnSetTensor4dDescriptor(self.in_desc, tensor_format, data_type,
+                # in_images, in_channels, in_height, in_width)
 
         self.filt_desc = libcudnn.cudnnCreateFilterDescriptor()
         libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, data_type, filter_maps,
@@ -124,32 +125,29 @@ class Convolution(SlidingLayer):
 
         # Get output dimensions (first two values are n_input and filters_out)
         _, _, out_height2, out_width2 = libcudnn.cudnnGetConvolution2dForwardOutputDim(
-            self.conv_desc, self.in_desc, self.filt_desc)
+            self.conv_desc, self.in_desc.ptr, self.filt_desc)
 
         assert(out_width == out_width2)
         assert(out_height == out_height2)
 
-        self.out_desc = libcudnn.cudnnCreateTensorDescriptor()
-        libcudnn.cudnnSetTensor4dDescriptor(self.out_desc, tensor_format, data_type, in_images,
-            filter_maps, out_height, out_width)
+        self.out_desc = self.output.get_cudnn_tensor_desc()
+        
+        # libcudnn.cudnnCreateTensorDescriptor()
+        # libcudnn.cudnnSetTensor4dDescriptor(self.out_desc, tensor_format, data_type, in_images,
+            # filter_maps, out_height, out_width)
 
         # find best convolution algorithm
-        self.algo = libcudnn.cudnnGetConvolutionForwardAlgorithm(context.cudnn, self.in_desc,
-            self.filt_desc, self.conv_desc, self.out_desc, self.convolution_fwd_pref, 0)
+        self.algo = libcudnn.cudnnGetConvolutionForwardAlgorithm(context.cudnn, self.in_desc.ptr,
+            self.filt_desc, self.conv_desc, self.out_desc.ptr, self.convolution_fwd_pref, 0)
  
         print("Convolution::configure: algo=%s" % str(self.algo))
 
-        self.ws_size = libcudnn.cudnnGetConvolutionForwardWorkspaceSize(context.cudnn, self.in_desc, 
-                self.filt_desc, self.conv_desc, self.in_desc, self.algo)
+        self.ws_size = libcudnn.cudnnGetConvolutionForwardWorkspaceSize(context.cudnn, 
+                self.in_desc.ptr, self.filt_desc, self.conv_desc, self.out_desc.ptr, self.algo)
         self.ws_ptr  = drv.mem_alloc(self.ws_size.value) if self.ws_size.value > 0 else 0
 
     def fprop(self, input):
 
-        # Get pointers to GPU memory
-        in_data = ctypes.c_void_p(int(input.gpudata))
-        filt_data = ctypes.c_void_p(int(self.W.gpudata))
-        out_data = ctypes.c_void_p(int(self.output.gpudata))
-        ws_data = ctypes.c_void_p(int(self.ws_ptr))
 
         print("\nConvolution::fprop: alpha=%f, beta=%f" % (self.alpha, self.beta))
         print("in_data: ", input.ptr)
@@ -157,10 +155,13 @@ class Convolution(SlidingLayer):
         print("out_data: ", self.output.ptr)
         print("ws_data:", self.ws_ptr, self.ws_size)
         
+        ws_data = ctypes.c_void_p(int(self.ws_ptr))
 
-        libcudnn.cudnnConvolutionForward(context.cudnn, self.alpha, self.in_desc, in_data,
-            self.filt_desc, filt_data, self.conv_desc, self.algo, ws_data, 
-            self.ws_size.value, self.beta, self.out_desc, out_data)
+        libcudnn.cudnnConvolutionForward(context.cudnn, self.alpha, 
+                self.in_desc.ptr, input.get_gpu_voidp(),
+                self.filt_desc, self.W.get_gpu_voidp(), 
+                self.conv_desc, self.algo, ws_data, self.ws_size.value, self.beta, 
+                self.out_desc.ptr, self.output.get_gpu_voidp())
         print("OK")
 
     def __str__(self):
@@ -226,7 +227,8 @@ class Pooling(SlidingLayer):
         print("out_data:", self.output.ptr)
 
         libcudnn.cudnnPoolingForward(context.cudnn, self.pool_desc, self.alpha,
-                self.in_desc, in_data, self.beta, self.out_desc, out_data)
+                self.in_desc.ptr, input.get_gpu_voidp(), 
+                self.beta, self.out_desc.ptr, self.output.get_gpu_voidp())
 
 
 class Activation(Layer):
@@ -252,10 +254,10 @@ class Activation(Layer):
         libcudnn.cudnnActivationForward(context.cudnn,
                 libcudnn.cudnnActivationMode['CUDNN_ACTIVATION_RELU'],
                 self.alpha,
-                self.inout_desc,
+                self.inout_desc.ptr,
                 data,
                 self.beta,
-                self.inout_desc,
+                self.inout_desc.ptr,
                 data)
 
     def __str__(self):
@@ -297,7 +299,13 @@ class Linear(Layer):
     def fprop(self, input):
         input_2d = input.reshape((self.W.shape[1], 1)) 
         output_2d = self.output.reshape(self.W.shape[0], 1)
+        print(input_2d.flags.c_contiguous)
+        print(output_2d.flags.c_contiguous)
 
+        # np.save("a.npy", self.W.get())
+        # np.save("b.npy", input_2d.get())
+
+        print("Linear::fprop()", self.W.shape, input_2d.shape, output_2d.shape)
         cublas_dot.cublas_gemm(context.cublas, self.W, input_2d, output_2d)
 
     def __str__(self):
