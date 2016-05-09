@@ -6,10 +6,15 @@ import numpy as np
 import argparse
 import json
 
+import context
 import lmdb_data
+import cublas_dot
 
-from pycuda import gpuarray
+import pycuda.driver as drv
 import pycuda.autoinit
+import libcudnn, ctypes
+
+from gputensor import GPUTensor
 
 parser = argparse.ArgumentParser(description='Postprocess hypercap runs')
 
@@ -20,26 +25,11 @@ parser.add_argument("--data", metavar="<path>", required=True, type=str,
 
 args = parser.parse_args()
 
-class GPUTensor(gpuarray.GPUArray):
-    def __init__(self, initializer, dtype=np.float32):
 
-        if isinstance(initializer, str):
-            npdata = self.load_data(initializer)
-            # print(npdata.shape)
-            super().__init__(npdata.shape, dtype=npdata.dtype)
-            self.set(npdata)
-        elif isinstance(initializer, tuple):
-            # print("GPUTensor(shape=", initializer)
-            super().__init__(initializer, dtype=dtype)
+tensor_format = libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']
+data_type = libcudnn.cudnnDataType['CUDNN_DATA_FLOAT']
 
-    def load_data(self, filename):
 
-        ext = os.path.splitext(filename)[1]
-        # print(ext)
-        if ext == ".npy":
-            return np.load(filename)
-        else:
-            raise RuntimeError("Unknown tensor file extension '%s'" % ext) 
 
 class Layer:
     def __init__(self, name=None):
@@ -71,6 +61,10 @@ class SlidingLayer:
 
 
 class Convolution(SlidingLayer):
+
+    convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CROSS_CORRELATION']
+    convolution_fwd_pref = libcudnn.cudnnConvolutionFwdPreference['CUDNN_CONVOLUTION_FWD_PREFER_FASTEST']
+
     def __init__(self, config, name="Convolution"):
         super().__init__(config, name)
         self.output = None
@@ -78,6 +72,14 @@ class Convolution(SlidingLayer):
         self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]))
         self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]))
         print(self.W.shape)
+
+        self.alpha = 1.0
+        self.beta = 0.0
+
+        self.in_desc = None
+        self.out_desc = None
+        self.filt_desc = None
+        self.conv_desc = None
 
     def configure(self, input):
         print("Convolution::configure: input shape =", input.shape)
@@ -96,10 +98,74 @@ class Convolution(SlidingLayer):
 
         self.output = GPUTensor((in_images, filter_maps, out_height, out_width))
         print("Convolution::configure: output shape =", self.output.shape)
-    
+   
+        # initialize cudnn descriptors
+
+        if self.in_desc:
+            libcudnn.cudnnDestroyTensorDescriptor(self.in_desc)
+        if self.out_desc:
+            libcudnn.cudnnDestroyTensorDescriptor(self.out_desc)
+        if self.filt_desc:
+            libcudnn.cudnnDestroyFilterDescriptor(self.filt_desc)
+        if self.conv_desc:
+            libcudnn.cudnnDestroyConvolutionDescriptor(self.conv_desc)
+
+        self.in_desc = libcudnn.cudnnCreateTensorDescriptor()
+        libcudnn.cudnnSetTensor4dDescriptor(self.in_desc, tensor_format, data_type,
+                in_images, in_channels, in_height, in_width)
+
+        self.filt_desc = libcudnn.cudnnCreateFilterDescriptor()
+        libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, data_type, filter_maps,
+                filter_channels, self.kH, self.kW)
+
+        self.conv_desc = libcudnn.cudnnCreateConvolutionDescriptor()
+        libcudnn.cudnnSetConvolution2dDescriptor(self.conv_desc, self.padH, self.padW,
+                self.dH, self.dW, 1, 1, self.convolution_mode)
+
+        # Get output dimensions (first two values are n_input and filters_out)
+        _, _, out_height2, out_width2 = libcudnn.cudnnGetConvolution2dForwardOutputDim(
+            self.conv_desc, self.in_desc, self.filt_desc)
+
+        assert(out_width == out_width2)
+        assert(out_height == out_height2)
+
+        self.out_desc = libcudnn.cudnnCreateTensorDescriptor()
+        libcudnn.cudnnSetTensor4dDescriptor(self.out_desc, tensor_format, data_type, in_images,
+            filter_maps, out_height, out_width)
+
+        # find best convolution algorithm
+        self.algo = libcudnn.cudnnGetConvolutionForwardAlgorithm(context.cudnn, self.in_desc,
+            self.filt_desc, self.conv_desc, self.out_desc, self.convolution_fwd_pref, 0)
+ 
+        print("Convolution::configure: algo=%s" % str(self.algo))
+
+        self.ws_size = libcudnn.cudnnGetConvolutionForwardWorkspaceSize(context.cudnn, self.in_desc, 
+                self.filt_desc, self.conv_desc, self.in_desc, self.algo)
+        self.ws_ptr  = drv.mem_alloc(self.ws_size.value) if self.ws_size.value > 0 else 0
+
+    def fprop(self, input):
+
+        # Get pointers to GPU memory
+        in_data = ctypes.c_void_p(int(input.gpudata))
+        filt_data = ctypes.c_void_p(int(self.W.gpudata))
+        out_data = ctypes.c_void_p(int(self.output.gpudata))
+        ws_data = ctypes.c_void_p(int(self.ws_ptr))
+
+        print("\nConvolution::fprop: alpha=%f, beta=%f" % (self.alpha, self.beta))
+        print("in_data: ", input.ptr)
+        print("filt_data: ", self.W.ptr)
+        print("out_data: ", self.output.ptr)
+        print("ws_data:", self.ws_ptr, self.ws_size)
+        
+
+        libcudnn.cudnnConvolutionForward(context.cudnn, self.alpha, self.in_desc, in_data,
+            self.filt_desc, filt_data, self.conv_desc, self.algo, ws_data, 
+            self.ws_size.value, self.beta, self.out_desc, out_data)
+        print("OK")
 
     def __str__(self):
         return SlidingLayer.__str__(self) + ", " + str(self.W.shape)
+
 
 class Pooling(SlidingLayer):
     class Mode(enum.IntEnum):
@@ -111,6 +177,13 @@ class Pooling(SlidingLayer):
         self.mode = mode
         
         assert(config["ceil_mode"] == False)
+
+        self.alpha = 1.0
+        self.beta = 0.0
+
+        self.pool_desc = None
+        self.in_desc = None
+        self.out_desc = None
 
 
     def configure(self, input):
@@ -128,6 +201,34 @@ class Pooling(SlidingLayer):
 
         self.output = GPUTensor( (in_images, in_channels, out_height, out_width) ) 
 
+        if self.pool_desc:
+            libcudnn.cudnnDestroyPoolingDescriptor(self.pool_desc)
+        if self.in_desc:
+            libcudnn.cudnnDestroyTensorDescriptor(self.in_desc)
+        if self.out_desc:
+            libcudnn.cudnnDestroyTensorDescriptor(self.out_desc)
+
+        self.in_desc = input.get_cudnn_tensor_desc()
+        self.out_desc = self.output.get_cudnn_tensor_desc()
+
+        self.pool_desc = libcudnn.cudnnCreatePoolingDescriptor()
+        libcudnn.cudnnSetPooling2dDescriptor(self.pool_desc,
+            libcudnn.cudnnPoolingMode["CUDNN_POOLING_MAX"],
+            # libcudnn.cudnnNanPropagation["CUDNN_NOT_PROPAGATE_NAN"],
+            self.kH, self.kW, self.padH, self.padW, self.dH, self.dW)
+
+    def fprop(self, input):
+        in_data = ctypes.c_void_p(int(input.gpudata))
+        out_data = ctypes.c_void_p(int(self.output.gpudata))
+
+        print("Pooling::fprop()")
+        print("in_data:", input.ptr)
+        print("out_data:", self.output.ptr)
+
+        libcudnn.cudnnPoolingForward(context.cudnn, self.pool_desc, self.alpha,
+                self.in_desc, in_data, self.beta, self.out_desc, out_data)
+
+
 class Activation(Layer):
     class Func(enum.IntEnum):
         ReLU = 1,
@@ -135,9 +236,27 @@ class Activation(Layer):
 
     def __init__(self, function):
         self.func = function
+        self.alpha = 1.0
+        self.beta = 0.0
 
     def configure(self, input):
         self.output = input
+
+        self.inout_desc = input.get_cudnn_tensor_desc()
+
+    def fprop(self, input):
+        print("Activation::fprop()")
+        data = ctypes.c_void_p(int(input.gpudata))
+        print("data ptr =", input.ptr)
+    
+        libcudnn.cudnnActivationForward(context.cudnn,
+                libcudnn.cudnnActivationMode['CUDNN_ACTIVATION_RELU'],
+                self.alpha,
+                self.inout_desc,
+                data,
+                self.beta,
+                self.inout_desc,
+                data)
 
     def __str__(self):
         return "Activation: " + self.func.name 
@@ -149,6 +268,10 @@ class Dropout(Layer):
 
     def configure(self, input):
         self.output = input
+
+    def fprop(self, input):
+        input *= self.p
+
     def __str__(self):
         return "Dropout: p=%f" % self.p
 
@@ -165,10 +288,20 @@ class Linear(Layer):
         print("Linear::configure: W shape =", self.W.shape)
         print("Linear::configure: b shape =", self.bias.shape)
 
+        elems_per_image  = np.prod(input.shape)
+        # print(elems_per_image, self.W.shape[1])
 
+        assert(elems_per_image == self.W.shape[1])
+        self.output = GPUTensor((1,self.W.shape[0], 1, 1), dtype=input.dtype)
         
+    def fprop(self, input):
+        input_2d = input.reshape((self.W.shape[1], 1)) 
+        output_2d = self.output.reshape(self.W.shape[0], 1)
+
+        cublas_dot.cublas_gemm(context.cublas, self.W, input_2d, output_2d)
+
     def __str__(self):
-        return "Linear: "
+        return "Linear: %dx%d" % (self.W.shape[0], self.W.shape[1])
 
 class SoftMax(Layer):
     class Mode(enum.IntEnum):
@@ -180,6 +313,23 @@ class SoftMax(Layer):
 
     def __str__(self):
         return "SoftMax: %s" % self.mode
+
+    def configure(self, input):
+        print("SoftMax::configure: input shape =", input.shape)
+
+        self.in_desc = input.get_cudnn_tensor_desc()
+        # self.out_desc = 
+        self.output = input
+
+    def fprop(self, input):
+        algo = libcudnn.cudnnSoftmaxAlgorithm["CUDNN_SOFTMAX_LOG"]
+        mode = libcudnn.cudnnSoftmaxMode['CUDNN_SOFTMAX_MODE_CHANNEL']
+
+        alpha = 1.0
+        beta = 0.0
+        libcudnn.cudnnSoftmaxForward(context.cudnn, algo, mode, alpha, self.in_desc, input.get_gpu_voidp(),
+                beta, self.in_desc, self.output.get_gpu_voidp())
+
 
 class Model:
     def __init__(self, json_model_file):
@@ -237,8 +387,16 @@ class Model:
 
 
     def evaluate(self, input):
-        self.configure(input)
+        # self.configure(input)
 
+        self.layers[0].fprop(input)
+
+        for i in range(1, len(self.layers)):
+            self.layers[i].fprop(self.layers[i-1].output)
+
+        y = self.layers[-1].output.get()
+        print(y)
+        return y
 # if __name__ == "__main__":
 if True:
 
@@ -248,6 +406,9 @@ if True:
     yt, data = datasrc.get_item()
     model = Model(args.model)
 
-    data = np.expand_dims(np.rollaxis(data,2), 0)
+    data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
+    input_tensor = GPUTensor(data)
+    print(data.shape)
     print(model)
-    y = model.evaluate(data)
+    model.configure(input_tensor)
+    y = model.evaluate(input_tensor)
