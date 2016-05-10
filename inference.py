@@ -457,8 +457,9 @@ if __name__ == "__main__":
     model = Model(args.model)
     print(model)
 
+    num_tot = 0
     num_eq = 0
-    for i in range(10000):
+    for i in range(num_tot):
         yt, data = datasrc.get_item()
         data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
         data = model.normalize(data)
@@ -469,4 +470,5 @@ if __name__ == "__main__":
         print(y, yt)
         if y == yt:
             num_eq += 1
-    print("num_eq =", num_eq)
+    # print("num_eq =", num_eq)
+    print("Error rate: %.2f" % 100.0 * (num_tot - num_eq) / num_tot)
