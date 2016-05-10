@@ -18,12 +18,13 @@ class LMDB_Data:
 
     def get_item(self):
         key,val = self.cursor.item()
-
+        self.cursor.next()
         label_len = struct.unpack("!I", val[0:4])[0]
         label = (val[4:4+label_len]).decode()
-        print(key, label, len(val))
+        # print(key, label, len(val))
 
         img = Image.open(BytesIO(val[4+label_len:]))
+        img.save("test.jpg")
         # print(img.size)
 
         a = np.asarray(img)

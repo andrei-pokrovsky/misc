@@ -33,18 +33,19 @@ class GPUTensor(gpuarray.GPUArray):
 
     tensor_format = libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']
 
-    def __init__(self, initializer, dtype=np.float32):
+    def __init__(self, initializer, dtype=np.float32, shape=None):
 
         if isinstance(initializer, str):
             npdata = self.load_data(initializer)
-            # print(npdata.shape)
+            if shape is not None:
+                npdata = npdata.reshape(shape)
             super().__init__(npdata.shape, dtype=npdata.dtype)
             self.set(npdata)
         elif isinstance(initializer, tuple):
             # print("GPUTensor(shape=", initializer)
             super().__init__(initializer, dtype=dtype)
         elif isinstance(initializer, np.ndarray):
-            print("SHAPE:", initializer.shape)
+            # print("SHAPE:", initializer.shape)
             super().__init__(initializer.shape, dtype=initializer.dtype)
             self.set(initializer)
         else:

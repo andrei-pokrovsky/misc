@@ -1,72 +1,79 @@
 
 import numpy as np
 import pycuda.driver as drv
+import pycuda.autoinit
 from pycuda import gpuarray
-from pycuda.autoinit import context
-from scikits.cuda import cublas
 
+from gputensor import GPUTensor
 import cublas_dot
-print(context.get_device().name())
+import context
 
-cbh = cublas.cublasCreate()
-print("CUBLAS Version:", cublas.cublasGetVersion(cbh))
+# print(context.get_device().name())
 
 def gpu_tensor_gemm(handle, a, b):
     c = gpuarray.GPUArray((a.shape[0], b.shape[1]), dtype=a.dtype)
     cublas_dot.cublas_gemm(handle, a, b, c)
     return c
 
+def test_saved():
 
-a = np.load("a.npy")
-b = np.load("b.npy")
-print(np.isnan(a).any())
-print(np.isnan(b).any())
+    a = np.load("a.npy")
+    b = np.load("b.npy")
+    print(np.isnan(a).any())
+    print(np.isnan(b).any())
 
-c = np.dot(a,b)
-print(b)
-print("A:", a.shape, a.dtype)
-print("B:", b.shape, b.dtype)
-print("C:", c.shape, c.dtype)
+    c = np.dot(a,b)
+    print(b)
+    print("A:", a.shape, a.dtype)
+    print("B:", b.shape, b.dtype)
+    print("C:", c.shape, c.dtype)
 
-ad = gpuarray.to_gpu(a)
-bd = gpuarray.to_gpu(b)
-cd = gpu_tensor_gemm(cbh, ad, bd)
+# ad = gpuarray.to_gpu(a)
+# bd = gpuarray.to_gpu(b)
+    ad = GPUTensor(a)
+    bd = GPUTensor(b)
+    cd = gpu_tensor_gemm(context.cublas, ad, bd)
 
-c2 = cd.get()
-print("C2:", c2.shape)
-print(np.allclose(c, c2, atol=0.00005, equal_nan=True))
-print(c)
-print(c2)
-exit(0)
+    print("A:", ad.shape, ad.strides, ad.size, ad.mem_size, str(ad.flags.c_contiguous))
+    print("B:", bd.shape, bd.strides, bd.size, bd.mem_size, str(bd.flags.c_contiguous))
+    print("C:", cd.shape, cd.strides, cd.size, cd.mem_size, str(cd.flags.c_contiguous))
+    c2 = cd.get()
+    print("C2:", c2.shape)
+    print("ISOK:", np.allclose(c, c2, atol=0.00005, equal_nan=True))
+    # print(c)
+    # print(c2)
 
+def test_ranges():
+        
+    for i in range(100):
 
-for i in range(100):
+        m = np.random.randint(1,1024)
+        k = np.random.randint(1,1024)
+        n = np.random.randint(1,1024)
 
-    m = np.random.randint(1,1024)
-    k = np.random.randint(1,1024)
-    n = np.random.randint(1,1024)
+        ah = np.random.rand(m, k).astype(np.float32)
+        bh = np.random.rand(k, n).astype(np.float32)
 
-    ah = np.random.rand(m, k).astype(np.float32)
-    bh = np.random.rand(k, n).astype(np.float32)
+        # an = np.array([[1,2],[3,4]], dtype=np.float32)
+        # bn = np.array([[1,3],[2,1]], dtype=np.float32)
+        ch = np.dot(ah, bh)
+        # print("C:\n", ch)
 
-    # an = np.array([[1,2],[3,4]], dtype=np.float32)
-    # bn = np.array([[1,3],[2,1]], dtype=np.float32)
-    ch = np.dot(ah, bh)
-    # print("C:\n", ch)
+        a = gpuarray.to_gpu(ah)
+        b = gpuarray.to_gpu(bh)
+        c = gpu_tensor_gemm(cbh, a, b)
 
-    a = gpuarray.to_gpu(ah)
-    b = gpuarray.to_gpu(bh)
-    c = gpu_tensor_gemm(cbh, a, b)
+        ch2 = c.get()
+        # print(ch2)
+        eq = np.allclose(ch, ch2)
+        if not eq:
+            print("%dx%d * %dx%d => %dx%d : %s" % (m, k, k, n, m, n, eq)) 
+            print("C1 =", ch)
+            print("C2 =", ch2)
 
-    ch2 = c.get()
-    # print(ch2)
-    eq = np.allclose(ch, ch2)
-    if not eq:
-        print("%dx%d * %dx%d => %dx%d : %s" % (m, k, k, n, m, n, eq)) 
-        print("C1 =", ch)
-        print("C2 =", ch2)
-
-cublas.cublasDestroy(cbh)
+if __name__ == "__main__":
+    test_saved()
+ # cublas.cublasDestroy(cbh)
 
 
     # print("A shape =", a.shape)

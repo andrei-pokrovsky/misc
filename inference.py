@@ -5,16 +5,17 @@ import os.path
 import numpy as np
 import argparse
 import json
-
-import context
 import lmdb_data
-import cublas_dot
 
-import pycuda.driver as drv
 import pycuda.autoinit
+import pycuda.driver as drv
+import context
+import cublas_dot
 import libcudnn, ctypes
 
+from pycuda import gpuarray
 from gputensor import GPUTensor
+# import test_cublas
 
 parser = argparse.ArgumentParser(description='Postprocess hypercap runs')
 
@@ -25,10 +26,8 @@ parser.add_argument("--data", metavar="<path>", required=True, type=str,
 
 args = parser.parse_args()
 
-
 tensor_format = libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']
 data_type = libcudnn.cudnnDataType['CUDNN_DATA_FLOAT']
-
 
 
 class Layer:
@@ -41,6 +40,8 @@ class Layer:
     def fprop(self, inputs, inference=False):
         raise NotImplementedError
 
+    def __str__(self):
+        return "Layer"
 
 class SlidingLayer:
     def __init__(self, config, name=None):
@@ -62,7 +63,8 @@ class SlidingLayer:
 
 class Convolution(SlidingLayer):
 
-    convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CROSS_CORRELATION']
+    # convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CROSS_CORRELATION']
+    convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CONVOLUTION']
     convolution_fwd_pref = libcudnn.cudnnConvolutionFwdPreference['CUDNN_CONVOLUTION_FWD_PREFER_FASTEST']
 
     def __init__(self, config, name="Convolution"):
@@ -70,16 +72,39 @@ class Convolution(SlidingLayer):
         self.output = None
 
         self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]))
-        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]))
-        print(self.W.shape)
 
         self.alpha = 1.0
         self.beta = 0.0
 
         self.in_desc = None
         self.out_desc = None
-        self.filt_desc = None
-        self.conv_desc = None
+
+        self.num_filter_maps = self.W.shape[0]
+        self.num_filter_channels = self.W.shape[1]
+
+        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]), 
+                shape=(1, self.num_filter_maps, 1, 1))
+
+        # assert(self.bias.shape[0] == self.num_filter_maps)
+        # self.bias = self.bias.reshape((1, self.num_filter_maps, 1, 1))
+        print(self.bias.shape)
+        self.b_desc = self.bias.get_cudnn_tensor_desc()
+
+        self.filt_desc = libcudnn.cudnnCreateFilterDescriptor()
+        libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, data_type, self.num_filter_maps,
+                self.num_filter_channels, self.kH, self.kW)
+
+        print("B:", self.bias.shape)
+        # self.bias_desc = 
+        self.conv_desc = libcudnn.cudnnCreateConvolutionDescriptor()
+        libcudnn.cudnnSetConvolution2dDescriptor(self.conv_desc, self.padH, self.padW,
+                self.dH, self.dW, 1, 1, self.convolution_mode)
+
+    def __del__(self):
+        if self.filt_desc:
+            libcudnn.cudnnDestroyFilterDescriptor(self.filt_desc)
+        if self.conv_desc:
+            libcudnn.cudnnDestroyConvolutionDescriptor(self.conv_desc)
 
     def configure(self, input):
         print("Convolution::configure: input shape =", input.shape)
@@ -89,39 +114,26 @@ class Convolution(SlidingLayer):
         in_height = input.shape[2]
         in_width = input.shape[3]
 
-        filter_maps = self.W.shape[0]
-        filter_channels = self.W.shape[1]
-        assert(in_channels == filter_channels)
+        assert(in_channels == self.num_filter_channels)
        
         out_width  = int((1.0 * in_width + 2*self.padW - self.kW) / self.dW + 1);
         out_height = int((1.0 * in_height + 2*self.padH - self.kH) / self.dH + 1);
 
-        self.output = GPUTensor((in_images, filter_maps, out_height, out_width))
+        self.output = GPUTensor((in_images, self.num_filter_maps, out_height, out_width))
         print("Convolution::configure: output shape =", self.output.shape)
    
         # initialize cudnn descriptors
 
         if self.in_desc:
-            libcudnn.cudnnDestroyTensorDescriptor(self.in_desc)
+            libcudnn.cudnnDestroyTensorDescriptor(self.in_desc.ptr)
         if self.out_desc:
-            libcudnn.cudnnDestroyTensorDescriptor(self.out_desc)
-        if self.filt_desc:
-            libcudnn.cudnnDestroyFilterDescriptor(self.filt_desc)
-        if self.conv_desc:
-            libcudnn.cudnnDestroyConvolutionDescriptor(self.conv_desc)
+            libcudnn.cudnnDestroyTensorDescriptor(self.out_desc.ptr)
 
         self.in_desc = input.get_cudnn_tensor_desc()
         # libcudnn.cudnnCreateTensorDescriptor()
         # libcudnn.cudnnSetTensor4dDescriptor(self.in_desc, tensor_format, data_type,
                 # in_images, in_channels, in_height, in_width)
 
-        self.filt_desc = libcudnn.cudnnCreateFilterDescriptor()
-        libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, data_type, filter_maps,
-                filter_channels, self.kH, self.kW)
-
-        self.conv_desc = libcudnn.cudnnCreateConvolutionDescriptor()
-        libcudnn.cudnnSetConvolution2dDescriptor(self.conv_desc, self.padH, self.padW,
-                self.dH, self.dW, 1, 1, self.convolution_mode)
 
         # Get output dimensions (first two values are n_input and filters_out)
         _, _, out_height2, out_width2 = libcudnn.cudnnGetConvolution2dForwardOutputDim(
@@ -149,11 +161,11 @@ class Convolution(SlidingLayer):
     def fprop(self, input):
 
 
-        print("\nConvolution::fprop: alpha=%f, beta=%f" % (self.alpha, self.beta))
-        print("in_data: ", input.ptr)
-        print("filt_data: ", self.W.ptr)
-        print("out_data: ", self.output.ptr)
-        print("ws_data:", self.ws_ptr, self.ws_size)
+        # print("\nConvolution::fprop: alpha=%f, beta=%f" % (self.alpha, self.beta))
+        # print("in_data: ", input.ptr)
+        # print("filt_data: ", self.W.ptr)
+        # print("out_data: ", self.output.ptr)
+        # print("ws_data:", self.ws_ptr, self.ws_size)
         
         ws_data = ctypes.c_void_p(int(self.ws_ptr))
 
@@ -162,10 +174,12 @@ class Convolution(SlidingLayer):
                 self.filt_desc, self.W.get_gpu_voidp(), 
                 self.conv_desc, self.algo, ws_data, self.ws_size.value, self.beta, 
                 self.out_desc.ptr, self.output.get_gpu_voidp())
-        print("OK")
+
+        libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
+                1.0, self.out_desc.ptr, self.output.get_gpu_voidp())
 
     def __str__(self):
-        return SlidingLayer.__str__(self) + ", " + str(self.W.shape)
+        return "%s, W=%s, b=%s" % (SlidingLayer.__str__(self), self.W.shape, self.bias.shape)
 
 
 class Pooling(SlidingLayer):
@@ -222,9 +236,9 @@ class Pooling(SlidingLayer):
         in_data = ctypes.c_void_p(int(input.gpudata))
         out_data = ctypes.c_void_p(int(self.output.gpudata))
 
-        print("Pooling::fprop()")
-        print("in_data:", input.ptr)
-        print("out_data:", self.output.ptr)
+        # print("Pooling::fprop()")
+        # print("in_data:", input.ptr)
+        # print("out_data:", self.output.ptr)
 
         libcudnn.cudnnPoolingForward(context.cudnn, self.pool_desc, self.alpha,
                 self.in_desc.ptr, input.get_gpu_voidp(), 
@@ -247,9 +261,9 @@ class Activation(Layer):
         self.inout_desc = input.get_cudnn_tensor_desc()
 
     def fprop(self, input):
-        print("Activation::fprop()")
+        # print("Activation::fprop()")
         data = ctypes.c_void_p(int(input.gpudata))
-        print("data ptr =", input.ptr)
+        # print("data ptr =", input.ptr)
     
         libcudnn.cudnnActivationForward(context.cudnn,
                 libcudnn.cudnnActivationMode['CUDNN_ACTIVATION_RELU'],
@@ -277,14 +291,18 @@ class Dropout(Layer):
     def __str__(self):
         return "Dropout: p=%f" % self.p
 
+
 class Linear(Layer):
     def __init__(self, config):
         super().__init__("Linear")
 
         self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]))
-        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]))
+        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]), 
+                shape=(1, self.W.shape[0], 1, 1))
+        # self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]))
+        self.b_desc = self.bias.get_cudnn_tensor_desc()
         print(self.W.shape)
-
+    
     def configure(self, input):
         print("Linear::configure: input shape =", input.shape)
         print("Linear::configure: W shape =", self.W.shape)
@@ -295,18 +313,30 @@ class Linear(Layer):
 
         assert(elems_per_image == self.W.shape[1])
         self.output = GPUTensor((1,self.W.shape[0], 1, 1), dtype=input.dtype)
+        self.output_desc = self.output.get_cudnn_tensor_desc()
         
     def fprop(self, input):
         input_2d = input.reshape((self.W.shape[1], 1)) 
         output_2d = self.output.reshape(self.W.shape[0], 1)
-        print(input_2d.flags.c_contiguous)
-        print(output_2d.flags.c_contiguous)
+        # print(input_2d.flags.c_contiguous)
+        # print(output_2d.flags.c_contiguous)
 
+        # test_cublas()
+        # exit(0)
         # np.save("a.npy", self.W.get())
         # np.save("b.npy", input_2d.get())
 
-        print("Linear::fprop()", self.W.shape, input_2d.shape, output_2d.shape)
+        # ad = self.W
+        # print("A:", ad.shape, ad.strides, ad.size, ad.mem_size, str(ad.flags.c_contiguous))
+        # print("B:", input.shape, input.strides, input.size, input.mem_size, str(input.flags.c_contiguous))
+        # print("B':", input_2d.shape, input_2d.strides, input_2d.size, input_2d.mem_size, str(input_2d.flags.c_contiguous))
+        # print("C:", output_2d.shape, output_2d.strides, output_2d.size, output_2d.mem_size, str(output_2d.flags.c_contiguous))
+        # print("Linear::fprop()", self.W.shape, input_2d.shape, output_2d.shape)
         cublas_dot.cublas_gemm(context.cublas, self.W, input_2d, output_2d)
+
+        # print("Linear::fprop()", self.output.shape)
+        libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
+                1.0, self.output_desc.ptr, self.output.get_gpu_voidp())
 
     def __str__(self):
         return "Linear: %dx%d" % (self.W.shape[0], self.W.shape[1])
@@ -335,8 +365,8 @@ class SoftMax(Layer):
 
         alpha = 1.0
         beta = 0.0
-        libcudnn.cudnnSoftmaxForward(context.cudnn, algo, mode, alpha, self.in_desc, input.get_gpu_voidp(),
-                beta, self.in_desc, self.output.get_gpu_voidp())
+        libcudnn.cudnnSoftmaxForward(context.cudnn, algo, mode, alpha, self.in_desc.ptr, input.get_gpu_voidp(),
+                beta, self.in_desc.ptr, self.output.get_gpu_voidp())
 
 
 class Model:
@@ -344,11 +374,15 @@ class Model:
         self.layers = []
         
         self.input = None
+        self.configured_shape = None
 
         with open(json_model_file) as f:
             jm = json.load(f)
 
+        self.average = jm["normalization"]["average"][0]
+        self.std_dev = jm["normalization"]["stdDev"][0]
         self.name = jm["modelName"]
+        self.classes = jm["classes"]
 
         for layer in jm["layers"]:
             if layer["type"] == "View":
@@ -357,6 +391,13 @@ class Model:
             self.layers.append(self.instantiate_layer(layer))
 
         # print(json.dumps(jm["layers"], indent=2))
+
+    def normalize(self, data):
+
+        # print(data.shape, self.average, self.std_dev)
+        data -= self.average
+        data /= self.std_dev
+        return data
 
     def instantiate_layer(self, layer):
         layer_type = layer["type"]
@@ -384,6 +425,7 @@ class Model:
         return s
 
     def configure(self, input):
+        print("Model::configure() input shape:", input.shape)
         self.input = input
 
         if not self.layers:
@@ -393,9 +435,10 @@ class Model:
         for i in range(1, len(self.layers)):
             self.layers[i].configure(self.layers[i-1].output)
 
-
     def evaluate(self, input):
-        # self.configure(input)
+        if self.configured_shape is None or self.configured_shape != input.shape:
+            self.configure(input)
+            self.configured_shape = input.shape
 
         self.layers[0].fprop(input)
 
@@ -403,20 +446,27 @@ class Model:
             self.layers[i].fprop(self.layers[i-1].output)
 
         y = self.layers[-1].output.get()
-        print(y)
-        return y
-# if __name__ == "__main__":
-if True:
+        i = np.argmax(y)
+        return self.classes[i]
 
+
+if __name__ == "__main__":
     datasrc = lmdb_data.LMDB_Data(args.data)
     print("Numer of data items: %d" % datasrc.num_items())
 
-    yt, data = datasrc.get_item()
     model = Model(args.model)
-
-    data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
-    input_tensor = GPUTensor(data)
-    print(data.shape)
     print(model)
-    model.configure(input_tensor)
-    y = model.evaluate(input_tensor)
+
+    num_eq = 0
+    for i in range(10000):
+        yt, data = datasrc.get_item()
+        data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
+        data = model.normalize(data)
+        input_tensor = GPUTensor(data)
+        # print(data.shape)
+        # model.configure(input_tensor)
+        y = model.evaluate(input_tensor)
+        print(y, yt)
+        if y == yt:
+            num_eq += 1
+    print("num_eq =", num_eq)

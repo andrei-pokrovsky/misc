@@ -30,7 +30,7 @@ def cublas_gemm(cublas_handle, a, b, c=None):
     opa = 'n'
     opb = 'n'
 
-    print("DATA:", b.ptr, a.ptr, c.ptr)
+    # print("DATA:", b.ptr, a.ptr, c.ptr)
     cublas.cublasSgemm(cublas_handle, opb, opa, n, m, k, 1.0, b.gpudata, ldb, a.gpudata, lda, 0.0, c.gpudata, ldc)
 
     # ch = c.get()
