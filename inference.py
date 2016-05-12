@@ -33,6 +33,7 @@ data_type = libcudnn.cudnnDataType['CUDNN_DATA_FLOAT']
 class Layer:
     def __init__(self, name=None):
         self.name = name
+        self.truth = None
 
     def configure(self, input):
         pass
@@ -43,9 +44,9 @@ class Layer:
     def __str__(self):
         return "Layer"
 
-class SlidingLayer:
+class SlidingLayer(Layer):
     def __init__(self, config, name=None):
-        self.name = name
+        super().__init__(name)
 
         for attr in [ "kW", "kH", "dH", "dW", "padH", "padW" ]:
             self.__dict__[attr] = config[attr]
@@ -63,8 +64,8 @@ class SlidingLayer:
 
 class Convolution(SlidingLayer):
 
-    # convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CROSS_CORRELATION']
-    convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CONVOLUTION']
+    convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CROSS_CORRELATION']
+    # convolution_mode = libcudnn.cudnnConvolutionMode['CUDNN_CONVOLUTION']
     convolution_fwd_pref = libcudnn.cudnnConvolutionFwdPreference['CUDNN_CONVOLUTION_FWD_PREFER_FASTEST']
 
     def __init__(self, config, name="Convolution"):
@@ -87,24 +88,25 @@ class Convolution(SlidingLayer):
 
         # assert(self.bias.shape[0] == self.num_filter_maps)
         # self.bias = self.bias.reshape((1, self.num_filter_maps, 1, 1))
-        print(self.bias.shape)
+        # print(self.bias.shape)
         self.b_desc = self.bias.get_cudnn_tensor_desc()
 
         self.filt_desc = libcudnn.cudnnCreateFilterDescriptor()
         libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, data_type, self.num_filter_maps,
                 self.num_filter_channels, self.kH, self.kW)
 
-        print("B:", self.bias.shape)
+        # print("B:", self.bias.shape)
         # self.bias_desc = 
         self.conv_desc = libcudnn.cudnnCreateConvolutionDescriptor()
         libcudnn.cudnnSetConvolution2dDescriptor(self.conv_desc, self.padH, self.padW,
                 self.dH, self.dW, 1, 1, self.convolution_mode)
 
     def __del__(self):
-        if self.filt_desc:
-            libcudnn.cudnnDestroyFilterDescriptor(self.filt_desc)
-        if self.conv_desc:
-            libcudnn.cudnnDestroyConvolutionDescriptor(self.conv_desc)
+        pass
+        # if self.filt_desc:
+            # libcudnn.cudnnDestroyFilterDescriptor(self.filt_desc)
+        # if self.conv_desc:
+            # libcudnn.cudnnDestroyConvolutionDescriptor(self.conv_desc)
 
     def configure(self, input):
         print("Convolution::configure: input shape =", input.shape)
@@ -122,6 +124,8 @@ class Convolution(SlidingLayer):
         self.output = GPUTensor((in_images, self.num_filter_maps, out_height, out_width))
         print("Convolution::configure: output shape =", self.output.shape)
    
+        if self.truth is not None:
+            print("OUTPUT TRUTH SHAPE:", self.truth.shape)
         # initialize cudnn descriptors
 
         if self.in_desc:
@@ -177,6 +181,20 @@ class Convolution(SlidingLayer):
 
         libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
                 1.0, self.out_desc.ptr, self.output.get_gpu_voidp())
+
+        if self.truth is not None:
+            truth = self.truth[0]
+            output = self.output[0].get()
+            if not np.allclose(truth, output, atol=0.0005):
+                print("CONV COMPARE:")
+                print(truth.shape)
+                print(output.shape)
+                print(truth[0][0])
+                print(output[0][0])
+                print("MAX DIFF:", np.max(np.abs(truth - output)))
+                exit(1)
+            else:
+                print("CONV COMPARED OK")
 
     def __str__(self):
         return "%s, W=%s, b=%s" % (SlidingLayer.__str__(self), self.W.shape, self.bias.shape)
@@ -244,6 +262,19 @@ class Pooling(SlidingLayer):
                 self.in_desc.ptr, input.get_gpu_voidp(), 
                 self.beta, self.out_desc.ptr, self.output.get_gpu_voidp())
 
+        if self.truth is not None:
+            truth = self.truth[0]
+            output = self.output[0].get()
+            if not np.allclose(truth, output, 0.0001, atol=0.0005):
+                print("POOL COMPARE:")
+                print(truth.shape)
+                print(output.shape)
+                print(truth[0][0])
+                print(output[0][0])
+                print("MAX DIFF:", np.max(np.max(truth - output)))
+                exit(1)
+            else:
+                print("POOL COMPARED OK")
 
 class Activation(Layer):
     class Func(enum.IntEnum):
@@ -251,6 +282,7 @@ class Activation(Layer):
         TanH = 2
 
     def __init__(self, function):
+        super().__init__(str(function))
         self.func = function
         self.alpha = 1.0
         self.beta = 0.0
@@ -274,13 +306,25 @@ class Activation(Layer):
                 self.inout_desc.ptr,
                 data)
 
+        if self.truth is not None:
+            truth = self.truth[0]
+            output = self.output[0].get().reshape(truth.shape)
+            if not np.allclose(truth, output, atol=0.005):
+                print("ReLU COMPARE FAILED:")
+                print(truth.shape)
+                print(output.shape)
+                print(truth)
+                print(output)
+                exit(1)
+            else:
+                print("ReLU COMPARED OK")
     def __str__(self):
         return "Activation: " + self.func.name 
 
 class Dropout(Layer):
     def __init__(self, p):
         super().__init__("Dropout")
-        self.p = p
+        self.p = 1.0
 
     def configure(self, input):
         self.output = input
@@ -291,6 +335,75 @@ class Dropout(Layer):
     def __str__(self):
         return "Dropout: p=%f" % self.p
 
+class BatchNormalization(Layer):
+    def __init__(self, config):
+        super().__init__("Linear")
+
+        assert(config["affine"])
+        
+        self.eps = config["eps"]
+
+        variance = np.load(os.path.join(config["baseDir"], config["parameterFiles"][3]))
+        nelem = variance.shape[0]
+        print("NELEM:", nelem)
+        # self.b_desc = self.bias.get_cudnn_tensor_desc()
+        if config["varianceFormat"] == "variance" and libcudnn.cudnnGetVersion() < 5000:
+            print("FIXING variance format\n\n")
+            variance += self.eps
+            variance = np.reciprocal(np.sqrt(variance))
+            
+        self.variance = GPUTensor(variance, shape=(1, nelem, 1, 1))
+        self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]), shape=(1, nelem, 1, 1))
+        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]), shape=(1, nelem, 1, 1)) 
+                # shape=(1, self.W.shape[0], 1, 1))
+        self.average = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][2]), shape=(1, nelem, 1, 1))
+
+        # print("BATCHNORM SHAPES: ", self.W.shape, self.bias.shape, self.variance.shape, self.average.shape)
+        # print(self.variance.get())
+        # print(self.average.get())
+        # exit(0)
+        self.param_desc = self.W.get_cudnn_tensor_desc()
+        self.in_desc = None
+        self.out_desc = None
+
+    def configure(self, input):
+        self.output = GPUTensor(input.shape)
+
+        if self.in_desc:
+            libcudnn.cudnnDestroyTensorDescriptor(self.in_desc.ptr)
+        if self.out_desc:
+            libcudnn.cudnnDestroyTensorDescriptor(self.out_desc.ptr)
+
+        self.in_desc = input.get_cudnn_tensor_desc()
+        self.out_desc = self.output.get_cudnn_tensor_desc()
+        print("BatchNormalization:configure() input=", input.shape, self.W.shape[0])
+
+    def fprop(self, input):
+        # The input transformation performed by this function is defined as: 
+        # y := alpha*y + beta *(bnScale * (x-estimatedMean)/sqrt(epsilon + estimatedVariance)+bnBias)
+        libcudnn.cudnnBatchNormalizationForwardInference(context.cudnn, 
+                libcudnn.cudnnBatchNormMode['CUDNN_BATCHNORM_SPATIAL'],
+                1.0, 0.0, self.in_desc.ptr, input.get_gpu_voidp(),
+                self.out_desc.ptr, self.output.get_gpu_voidp(),
+                self.param_desc.ptr, self.W.get_gpu_voidp(), self.bias.get_gpu_voidp(),
+                self.average.get_gpu_voidp(), self.variance.get_gpu_voidp(), self.eps)
+
+        if self.truth is not None:
+            truth = self.truth[0]
+            output = self.output[0].get()
+            if not np.allclose(truth, output, 0.0001, atol=0.0005):
+                print("BNORM COMPARE FAILED:")
+                print(truth.shape)
+                print(output.shape)
+                print(truth[0][0])
+                print(output[0][0])
+                print("MAX DIFF:", np.max(np.max(truth - output)))
+                exit(1)
+            else:
+                print("BNORM COMPARED OK")
+
+    def __str__(self):
+        return "BatchNormalization: %dx%d" % (self.W.shape[0], self.bias.shape[0])
 
 class Linear(Layer):
     def __init__(self, config):
@@ -315,6 +428,9 @@ class Linear(Layer):
         self.output = GPUTensor((1,self.W.shape[0], 1, 1), dtype=input.dtype)
         self.output_desc = self.output.get_cudnn_tensor_desc()
         
+        if self.truth is not None:
+            print("OUTPUT TRUTH SHAPE:", self.truth.shape, self.output.shape)
+
     def fprop(self, input):
         input_2d = input.reshape((self.W.shape[1], 1)) 
         output_2d = self.output.reshape(self.W.shape[0], 1)
@@ -338,6 +454,18 @@ class Linear(Layer):
         libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
                 1.0, self.output_desc.ptr, self.output.get_gpu_voidp())
 
+        if self.truth is not None:
+            truth = self.truth[0]
+            output = self.output[0].get().reshape(truth.shape)
+            if not np.allclose(truth, output, atol=0.005):
+                print("Linear COMPARE FAILED:")
+                print(truth.shape)
+                print(output.shape)
+                print(truth)
+                print(output)
+                exit(1)
+            else:
+                print("Linear COMPARED OK")
     def __str__(self):
         return "Linear: %dx%d" % (self.W.shape[0], self.W.shape[1])
 
@@ -347,6 +475,7 @@ class SoftMax(Layer):
         LOG = 2
 
     def __init__(self, mode):
+        super().__init__()
         self.mode = mode
 
     def __str__(self):
@@ -368,6 +497,19 @@ class SoftMax(Layer):
         libcudnn.cudnnSoftmaxForward(context.cudnn, algo, mode, alpha, self.in_desc.ptr, input.get_gpu_voidp(),
                 beta, self.in_desc.ptr, self.output.get_gpu_voidp())
 
+        if self.truth is not None:
+            truth = self.truth[0]
+            output = self.output[0].get().reshape(truth.shape)
+            if not np.allclose(truth, output, atol=0.005):
+                print("SoftMax COMPARE FAILED:")
+                print(truth.shape)
+                print(output.shape)
+                print(truth)
+                print(output)
+                exit(1)
+            else:
+                print("SoftMax COMPARED OK")
+
 
 class Model:
     def __init__(self, json_model_file):
@@ -384,11 +526,18 @@ class Model:
         self.name = jm["modelName"]
         self.classes = jm["classes"]
 
+        gi = 0
         for layer in jm["layers"]:
             if layer["type"] == "View":
                 continue
             layer["baseDir"] = os.path.dirname(json_model_file)
             self.layers.append(self.instantiate_layer(layer))
+
+            # gtfn = os.path.join("truth", "layer_%02d_output.npy" % gi)
+            # if os.path.isfile(gtfn):
+                # self.layers[-1].truth = np.load(gtfn)
+                # print("Loaded truth for layer %d from %s" % (gi, gtfn))
+            # gi += 1
 
         # print(json.dumps(jm["layers"], indent=2))
 
@@ -410,6 +559,8 @@ class Model:
             return Activation(Activation.Func.ReLU)
         elif layer_type == "SpatialMaxPooling":
             return Pooling(Pooling.Mode.MAX, layer)
+        elif layer_type == "SpatialBatchNormalization":
+            return BatchNormalization(layer)
         elif layer_type == "Dropout":
             return Dropout(layer["p"])
         elif layer_type == "Linear":
@@ -417,7 +568,7 @@ class Model:
         elif layer_type == "LogSoftMax":
             return SoftMax(SoftMax.Mode.LOG)
         else:
-            raise RuntimeError("Unsupported ayer type '%s'" % layer_type)
+            raise RuntimeError("Unsupported layer type '%s'" % layer_type)
 
     def __str__(self):
         s = self.name + ":\n"
@@ -440,6 +591,7 @@ class Model:
             self.configure(input)
             self.configured_shape = input.shape
 
+        # print("INPUT:", self.input.get()[0][1][1])
         self.layers[0].fprop(input)
 
         for i in range(1, len(self.layers)):
@@ -454,14 +606,33 @@ if __name__ == "__main__":
     datasrc = lmdb_data.LMDB_Data(args.data)
     print("Numer of data items: %d" % datasrc.num_items())
 
+    # yt, data = datasrc.get_item()
+    # print(data.shape)
+    # exit(0)
     model = Model(args.model)
     print(model)
 
+    inputs = np.load("truth/input.npy")
+    results = [["n01986214","n04252225" ],
+               ["n03938244","n02840245"],
+               ["n01644900","n01770393"],
+               ["n04019541","n04019541"]]
+
     num_eq = 0
-    for i in range(10000):
+    # print(inputs.shape, inputs.dtype)
+    # for i in [0,1,2,3]:
+    num = 128
+    for i in range(num):
         yt, data = datasrc.get_item()
         data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
         data = model.normalize(data)
+        # yt = results[i][0]
+        # data = np.expand_dims(inputs[i], 0)
+        # print(data.shape, data.dtype)
+        # print(data2.shape, data2.dtype)
+        # print(np.allclose(data,data2))
+        # continue
+        # exit(0)
         input_tensor = GPUTensor(data)
         # print(data.shape)
         # model.configure(input_tensor)
@@ -470,3 +641,4 @@ if __name__ == "__main__":
         if y == yt:
             num_eq += 1
     print("num_eq =", num_eq)
+    print("ERROR: %.3f" % (1.0 * (num - num_eq) / num))

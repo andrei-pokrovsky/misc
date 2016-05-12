@@ -40,18 +40,20 @@ with lmdb_out_env.begin(write=True) as out_txn:
         label=item[b"Name"].decode().split('_')[0]
         # print(label)
         
-        img = Image.open(BytesIO(bytes(item[b"Data"])))
-        # print(img.size)
+        jpeg_bytes = bytes(item[b"Data"])
+        if False:
+            img = Image.open(BytesIO(jpeg_data))
+            # print(img.size)
 
-        start_x = math.ceil((img.size[0] - in_width + 1) / 2)
-        start_y = math.ceil((img.size[1] - in_height + 1) / 2)
+            start_x = math.ceil((img.size[0] - in_width + 1) / 2)
+            start_y = math.ceil((img.size[1] - in_height + 1) / 2)
 
-        cropped = img.crop((start_x, start_y, start_x + in_width, start_y + in_height))
+            cropped = img.crop((start_x, start_y, start_x + in_width, start_y + in_height))
 
-        jpeg_fo = BytesIO()
-        cropped.save(jpeg_fo, "jpeg")
-        jpeg_fo.seek(0)
-        jpeg_bytes = jpeg_fo.read()
+            jpeg_fo = BytesIO()
+            cropped.save(jpeg_fo, "jpeg")
+            jpeg_fo.seek(0)
+            jpeg_bytes = jpeg_fo.read()
 
         label_data = label.encode('ascii')
 

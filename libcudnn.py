@@ -221,6 +221,19 @@ cudnnNanPropagation = {
     'CUDNN_PROPAGATE_NAN': 1
 }
 
+cudnnBatchNormMode = { 
+    'CUDNN_BATCHNORM_PER_ACTIVATION': 0, # Normalization is performed per-activation.
+                                         # This mode is intended to be used after nonconvolutional
+                                         # network layers. In this mode bnBias
+                                         # and bnScale tensor dimensions are 1xCxHxW.
+    
+    'CUDNN_BATCHNORM_SPATIAL': 1  # Normalization is performed over N+spatial
+                                  # dimensions. This mode is intended for use after
+                                  # convolutional layers (where spatial invariance
+                                  # is desired). In this mode bnBias, bnScale tensor
+                                  # dimensions are 1xCx1x1. 
+}
+
 
 def cudnnCheckStatus(status):
     """
@@ -1932,4 +1945,33 @@ def cudnnActivationBackward(handle, mode, alpha, srcDesc, srcData, srcDiffDesc, 
                                                srcDiffDesc, srcDiffData,
                                                destDesc, destData, betaRef,
                                                destDiffDesc, destDiffData)
+    cudnnCheckStatus(status)
+
+#---------------------------
+_libcudnn.cudnnBatchNormalizationForwardInference.restype = int
+_libcudnn.cudnnBatchNormalizationForwardInference.argtypes = [ctypes.c_void_p, ctypes.c_int, 
+                                              ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                              ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                              ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                              ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double]
+
+def cudnnBatchNormalizationForwardInference(handle, mode, alpha, beta, srcDesc, srcData, destDesc,
+                                            destData, bnParamDesc, scaleData, biasData,
+                                            meanData, varData, epsilon):
+    """
+    """
+
+    dataType = cudnnGetTensor4dDescriptor(destDesc)[0]
+    if dataType == cudnnDataType['CUDNN_DATA_DOUBLE']:
+        alphaRef = ctypes.byref(ctypes.c_double(alpha))
+        betaRef = ctypes.byref(ctypes.c_double(beta))
+    else:
+        alphaRef = ctypes.byref(ctypes.c_float(alpha))
+        betaRef = ctypes.byref(ctypes.c_float(beta))
+
+    status = _libcudnn.cudnnBatchNormalizationForwardInference(handle, mode, alphaRef, betaRef, 
+                                               srcDesc, srcData,
+                                               destDesc, destData,
+                                               bnParamDesc, scaleData, biasData, meanData,
+                                               varData, epsilon)
     cudnnCheckStatus(status)

@@ -46,6 +46,8 @@ class GPUTensor(gpuarray.GPUArray):
             super().__init__(initializer, dtype=dtype)
         elif isinstance(initializer, np.ndarray):
             # print("SHAPE:", initializer.shape)
+            if shape is not None or shape == initializer.shape:
+                initializer = initializer.reshape(shape)
             super().__init__(initializer.shape, dtype=initializer.dtype)
             self.set(initializer)
         else:
