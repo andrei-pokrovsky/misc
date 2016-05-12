@@ -15,7 +15,6 @@ import libcudnn, ctypes
 
 from pycuda import gpuarray
 from gputensor import GPUTensor
-# import test_cublas
 
 parser = argparse.ArgumentParser(description='Postprocess hypercap runs')
 
@@ -23,6 +22,8 @@ parser.add_argument("--model", metavar="<filename>", required=True, type=str,
                     help="json model filename")
 parser.add_argument("--data", metavar="<path>", required=True, type=str,
                     help="path to lmdb dir or image directory")
+parser.add_argument("--num-images", default=0, type=int,
+                    help="number of images to evaluate, 0=all")
 
 args = parser.parse_args()
 
@@ -41,8 +42,29 @@ class Layer:
     def fprop(self, inputs, inference=False):
         raise NotImplementedError
 
+    def check_truth(self, atol=0.0005):
+        if not self.truth:
+            return
+        truth = self.truth[0]
+        output = self.output[0]
+        if output.shape != truth.shape:
+            output.reshape(truth.shape)
+
+        if not np.allclose(truth, output, atol=atol):
+            print("%s COMPARE FAILED:" % self.name)
+            print(truth.shape)
+            print(output.shape)
+            print(truth[0][0])
+            print(output[0][0])
+            print("MAX DIFF:", np.max(np.abs(truth - output)))
+            exit(1)
+        else:
+            print("%s COMPARED OK" % self.name)
+    
+
     def __str__(self):
         return "Layer"
+
 
 class SlidingLayer(Layer):
     def __init__(self, config, name=None):
@@ -124,20 +146,13 @@ class Convolution(SlidingLayer):
         self.output = GPUTensor((in_images, self.num_filter_maps, out_height, out_width))
         print("Convolution::configure: output shape =", self.output.shape)
    
-        if self.truth is not None:
-            print("OUTPUT TRUTH SHAPE:", self.truth.shape)
         # initialize cudnn descriptors
-
         if self.in_desc:
             libcudnn.cudnnDestroyTensorDescriptor(self.in_desc.ptr)
         if self.out_desc:
             libcudnn.cudnnDestroyTensorDescriptor(self.out_desc.ptr)
 
         self.in_desc = input.get_cudnn_tensor_desc()
-        # libcudnn.cudnnCreateTensorDescriptor()
-        # libcudnn.cudnnSetTensor4dDescriptor(self.in_desc, tensor_format, data_type,
-                # in_images, in_channels, in_height, in_width)
-
 
         # Get output dimensions (first two values are n_input and filters_out)
         _, _, out_height2, out_width2 = libcudnn.cudnnGetConvolution2dForwardOutputDim(
@@ -148,10 +163,6 @@ class Convolution(SlidingLayer):
 
         self.out_desc = self.output.get_cudnn_tensor_desc()
         
-        # libcudnn.cudnnCreateTensorDescriptor()
-        # libcudnn.cudnnSetTensor4dDescriptor(self.out_desc, tensor_format, data_type, in_images,
-            # filter_maps, out_height, out_width)
-
         # find best convolution algorithm
         self.algo = libcudnn.cudnnGetConvolutionForwardAlgorithm(context.cudnn, self.in_desc.ptr,
             self.filt_desc, self.conv_desc, self.out_desc.ptr, self.convolution_fwd_pref, 0)
@@ -164,12 +175,7 @@ class Convolution(SlidingLayer):
 
     def fprop(self, input):
 
-
         # print("\nConvolution::fprop: alpha=%f, beta=%f" % (self.alpha, self.beta))
-        # print("in_data: ", input.ptr)
-        # print("filt_data: ", self.W.ptr)
-        # print("out_data: ", self.output.ptr)
-        # print("ws_data:", self.ws_ptr, self.ws_size)
         
         ws_data = ctypes.c_void_p(int(self.ws_ptr))
 
@@ -182,19 +188,7 @@ class Convolution(SlidingLayer):
         libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
                 1.0, self.out_desc.ptr, self.output.get_gpu_voidp())
 
-        if self.truth is not None:
-            truth = self.truth[0]
-            output = self.output[0].get()
-            if not np.allclose(truth, output, atol=0.0005):
-                print("CONV COMPARE:")
-                print(truth.shape)
-                print(output.shape)
-                print(truth[0][0])
-                print(output[0][0])
-                print("MAX DIFF:", np.max(np.abs(truth - output)))
-                exit(1)
-            else:
-                print("CONV COMPARED OK")
+        self.check_truth()
 
     def __str__(self):
         return "%s, W=%s, b=%s" % (SlidingLayer.__str__(self), self.W.shape, self.bias.shape)
@@ -262,19 +256,7 @@ class Pooling(SlidingLayer):
                 self.in_desc.ptr, input.get_gpu_voidp(), 
                 self.beta, self.out_desc.ptr, self.output.get_gpu_voidp())
 
-        if self.truth is not None:
-            truth = self.truth[0]
-            output = self.output[0].get()
-            if not np.allclose(truth, output, 0.0001, atol=0.0005):
-                print("POOL COMPARE:")
-                print(truth.shape)
-                print(output.shape)
-                print(truth[0][0])
-                print(output[0][0])
-                print("MAX DIFF:", np.max(np.max(truth - output)))
-                exit(1)
-            else:
-                print("POOL COMPARED OK")
+        self.check_truth()
 
 class Activation(Layer):
     class Func(enum.IntEnum):
@@ -306,18 +288,8 @@ class Activation(Layer):
                 self.inout_desc.ptr,
                 data)
 
-        if self.truth is not None:
-            truth = self.truth[0]
-            output = self.output[0].get().reshape(truth.shape)
-            if not np.allclose(truth, output, atol=0.005):
-                print("ReLU COMPARE FAILED:")
-                print(truth.shape)
-                print(output.shape)
-                print(truth)
-                print(output)
-                exit(1)
-            else:
-                print("ReLU COMPARED OK")
+        self.check_truth()
+
     def __str__(self):
         return "Activation: " + self.func.name 
 
@@ -335,6 +307,7 @@ class Dropout(Layer):
     def __str__(self):
         return "Dropout: p=%f" % self.p
 
+
 class BatchNormalization(Layer):
     def __init__(self, config):
         super().__init__("Linear")
@@ -345,23 +318,19 @@ class BatchNormalization(Layer):
 
         variance = np.load(os.path.join(config["baseDir"], config["parameterFiles"][3]))
         nelem = variance.shape[0]
-        print("NELEM:", nelem)
-        # self.b_desc = self.bias.get_cudnn_tensor_desc()
+
         if config["varianceFormat"] == "variance" and libcudnn.cudnnGetVersion() < 5000:
-            print("FIXING variance format\n\n")
+            # print("FIXING variance format")
             variance += self.eps
             variance = np.reciprocal(np.sqrt(variance))
             
         self.variance = GPUTensor(variance, shape=(1, nelem, 1, 1))
+
         self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]), shape=(1, nelem, 1, 1))
         self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]), shape=(1, nelem, 1, 1)) 
                 # shape=(1, self.W.shape[0], 1, 1))
         self.average = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][2]), shape=(1, nelem, 1, 1))
 
-        # print("BATCHNORM SHAPES: ", self.W.shape, self.bias.shape, self.variance.shape, self.average.shape)
-        # print(self.variance.get())
-        # print(self.average.get())
-        # exit(0)
         self.param_desc = self.W.get_cudnn_tensor_desc()
         self.in_desc = None
         self.out_desc = None
@@ -388,19 +357,7 @@ class BatchNormalization(Layer):
                 self.param_desc.ptr, self.W.get_gpu_voidp(), self.bias.get_gpu_voidp(),
                 self.average.get_gpu_voidp(), self.variance.get_gpu_voidp(), self.eps)
 
-        if self.truth is not None:
-            truth = self.truth[0]
-            output = self.output[0].get()
-            if not np.allclose(truth, output, 0.0001, atol=0.0005):
-                print("BNORM COMPARE FAILED:")
-                print(truth.shape)
-                print(output.shape)
-                print(truth[0][0])
-                print(output[0][0])
-                print("MAX DIFF:", np.max(np.max(truth - output)))
-                exit(1)
-            else:
-                print("BNORM COMPARED OK")
+        self.check_truth()
 
     def __str__(self):
         return "BatchNormalization: %dx%d" % (self.W.shape[0], self.bias.shape[0])
@@ -454,18 +411,9 @@ class Linear(Layer):
         libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
                 1.0, self.output_desc.ptr, self.output.get_gpu_voidp())
 
-        if self.truth is not None:
-            truth = self.truth[0]
-            output = self.output[0].get().reshape(truth.shape)
-            if not np.allclose(truth, output, atol=0.005):
-                print("Linear COMPARE FAILED:")
-                print(truth.shape)
-                print(output.shape)
-                print(truth)
-                print(output)
-                exit(1)
-            else:
-                print("Linear COMPARED OK")
+        self.check_truth()
+
+
     def __str__(self):
         return "Linear: %dx%d" % (self.W.shape[0], self.W.shape[1])
 
@@ -497,22 +445,10 @@ class SoftMax(Layer):
         libcudnn.cudnnSoftmaxForward(context.cudnn, algo, mode, alpha, self.in_desc.ptr, input.get_gpu_voidp(),
                 beta, self.in_desc.ptr, self.output.get_gpu_voidp())
 
-        if self.truth is not None:
-            truth = self.truth[0]
-            output = self.output[0].get().reshape(truth.shape)
-            if not np.allclose(truth, output, atol=0.005):
-                print("SoftMax COMPARE FAILED:")
-                print(truth.shape)
-                print(output.shape)
-                print(truth)
-                print(output)
-                exit(1)
-            else:
-                print("SoftMax COMPARED OK")
-
+        self.check_truth()
 
 class Model:
-    def __init__(self, json_model_file):
+    def __init__(self, json_model_file, load_truth=False):
         self.layers = []
         
         self.input = None
@@ -533,11 +469,12 @@ class Model:
             layer["baseDir"] = os.path.dirname(json_model_file)
             self.layers.append(self.instantiate_layer(layer))
 
-            # gtfn = os.path.join("truth", "layer_%02d_output.npy" % gi)
-            # if os.path.isfile(gtfn):
-                # self.layers[-1].truth = np.load(gtfn)
-                # print("Loaded truth for layer %d from %s" % (gi, gtfn))
-            # gi += 1
+            if load_truth:
+                gtfn = os.path.join("truth", "layer_%02d_output.npy" % gi)
+                if os.path.isfile(gtfn):
+                    self.layers[-1].truth = np.load(gtfn)
+                    print("Loaded truth for layer %d from %s" % (gi, gtfn))
+                gi += 1
 
         # print(json.dumps(jm["layers"], indent=2))
 
@@ -612,16 +549,9 @@ if __name__ == "__main__":
     model = Model(args.model)
     print(model)
 
-    inputs = np.load("truth/input.npy")
-    results = [["n01986214","n04252225" ],
-               ["n03938244","n02840245"],
-               ["n01644900","n01770393"],
-               ["n04019541","n04019541"]]
+    num_errors = 0
+    num = datasrc.num_items() if args.num_images == 0 else args.num_images
 
-    num_eq = 0
-    # print(inputs.shape, inputs.dtype)
-    # for i in [0,1,2,3]:
-    num = 128
     for i in range(num):
         yt, data = datasrc.get_item()
         data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
@@ -637,8 +567,7 @@ if __name__ == "__main__":
         # print(data.shape)
         # model.configure(input_tensor)
         y = model.evaluate(input_tensor)
-        print(y, yt)
-        if y == yt:
-            num_eq += 1
-    print("num_eq =", num_eq)
-    print("ERROR: %.3f" % (1.0 * (num - num_eq) / num))
+        # print(y, yt)
+        if y != yt:
+            num_errors += 1
+    print("DONE: %d images classified, error rate=%.4f" % (num, 1.0 * num_errors / num))
