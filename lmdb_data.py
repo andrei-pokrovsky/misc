@@ -27,12 +27,20 @@ class LMDB_Data:
         # cropped.save("cropped.ppm")
         return cropped
 
-    def get_item(self):
+    def get_raw_item(self):
         key,val = self.cursor.item()
         self.cursor.next()
         label_len = struct.unpack("!I", val[0:4])[0]
         label = (val[4:4+label_len]).decode()
+        return label, val[4+label_len:]
+
+    def get_item(self):
+        # key,val = self.cursor.item()
+        # self.cursor.next()
+        # label_len = struct.unpack("!I", val[0:4])[0]
+        # label = (val[4:4+label_len]).decode()
         # print(key, label, len(val))
+        label, data = self.get_raw_item()
 
         img = Image.open(BytesIO(val[4+label_len:]))
         img = self.crop_center(img, 224, 224)

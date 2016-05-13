@@ -5,7 +5,8 @@ import os.path
 import numpy as np
 import argparse
 import json
-import lmdb_data
+import time
+import tar_data
 
 import pycuda.autoinit
 import pycuda.driver as drv
@@ -22,14 +23,23 @@ parser.add_argument("--model", metavar="<filename>", required=True, type=str,
                     help="json model filename")
 parser.add_argument("--data", metavar="<path>", required=True, type=str,
                     help="path to lmdb dir or image directory")
+parser.add_argument("--precision", default="fp32", type=str, choices=["fp32","fp16"],
+                    help="floating point precision to use")
 parser.add_argument("--num-images", default=0, type=int,
                     help="number of images to evaluate, 0=all")
+parser.add_argument("--benchmark", default=False, action='store_true', 
+                    help="benchmark network with single batch")
 
 args = parser.parse_args()
 
 tensor_format = libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']
 data_type = libcudnn.cudnnDataType['CUDNN_DATA_FLOAT']
 
+np_2_cudnn_fmt = { 
+    np.float16: libcudnn.cudnnDataType['CUDNN_DATA_HALF'],
+    np.float32: libcudnn.cudnnDataType['CUDNN_DATA_FLOAT'],
+    np.float64: libcudnn.cudnnDataType['CUDNN_DATA_DOUBLE']
+}
 
 class Layer:
     def __init__(self, name=None):
@@ -61,6 +71,9 @@ class Layer:
         else:
             print("%s COMPARED OK" % self.name)
     
+    def load_tensor(self, config, index):
+        return GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][index]))
+
 
     def __str__(self):
         return "Layer"
@@ -131,7 +144,7 @@ class Convolution(SlidingLayer):
             # libcudnn.cudnnDestroyConvolutionDescriptor(self.conv_desc)
 
     def configure(self, input):
-        print("Convolution::configure: input shape =", input.shape)
+        # print("Convolution::configure: input shape =", input.shape)
         
         in_images = input.shape[0]
         in_channels = input.shape[1]
@@ -144,7 +157,7 @@ class Convolution(SlidingLayer):
         out_height = int((1.0 * in_height + 2*self.padH - self.kH) / self.dH + 1);
 
         self.output = GPUTensor((in_images, self.num_filter_maps, out_height, out_width))
-        print("Convolution::configure: output shape =", self.output.shape)
+        # print("Convolution::configure: output shape =", self.output.shape)
    
         # initialize cudnn descriptors
         if self.in_desc:
@@ -167,7 +180,7 @@ class Convolution(SlidingLayer):
         self.algo = libcudnn.cudnnGetConvolutionForwardAlgorithm(context.cudnn, self.in_desc.ptr,
             self.filt_desc, self.conv_desc, self.out_desc.ptr, self.convolution_fwd_pref, 0)
  
-        print("Convolution::configure: algo=%s" % str(self.algo))
+        # print("Convolution::configure: algo=%s" % str(self.algo))
 
         self.ws_size = libcudnn.cudnnGetConvolutionForwardWorkspaceSize(context.cudnn, 
                 self.in_desc.ptr, self.filt_desc, self.conv_desc, self.out_desc.ptr, self.algo)
@@ -345,7 +358,7 @@ class BatchNormalization(Layer):
 
         self.in_desc = input.get_cudnn_tensor_desc()
         self.out_desc = self.output.get_cudnn_tensor_desc()
-        print("BatchNormalization:configure() input=", input.shape, self.W.shape[0])
+        # print("BatchNormalization:configure() input=", input.shape, self.W.shape[0])
 
     def fprop(self, input):
         # The input transformation performed by this function is defined as: 
@@ -371,12 +384,12 @@ class Linear(Layer):
                 shape=(1, self.W.shape[0], 1, 1))
         # self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]))
         self.b_desc = self.bias.get_cudnn_tensor_desc()
-        print(self.W.shape)
+        # print(self.W.shape)
     
     def configure(self, input):
-        print("Linear::configure: input shape =", input.shape)
-        print("Linear::configure: W shape =", self.W.shape)
-        print("Linear::configure: b shape =", self.bias.shape)
+        # print("Linear::configure: input shape =", input.shape)
+        # print("Linear::configure: W shape =", self.W.shape)
+        # print("Linear::configure: b shape =", self.bias.shape)
 
         elems_per_image  = np.prod(input.shape)
         # print(elems_per_image, self.W.shape[1])
@@ -430,7 +443,7 @@ class SoftMax(Layer):
         return "SoftMax: %s" % self.mode
 
     def configure(self, input):
-        print("SoftMax::configure: input shape =", input.shape)
+        # print("SoftMax::configure: input shape =", input.shape)
 
         self.in_desc = input.get_cudnn_tensor_desc()
         # self.out_desc = 
@@ -538,9 +551,30 @@ class Model:
         i = np.argmax(y)
         return self.classes[i]
 
+def benchmark(datasrc, model):
+    start = time.time()
+    label, data = datasrc.get_item()
+    print("Data load time: %.2fms" % ((time.time() - start) * 1000.0))
+
+    start = time.time()
+    data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
+    data = model.normalize(data)
+    print("Data prep time: %.2fms" % ((time.time() - start) * 1000.0))
+
+    input_tensor = GPUTensor(data)
+    y = model.evaluate(input_tensor)
+    start = time.time()
+    num_iterations = 10
+    for i in range(num_iterations):
+        y = model.evaluate(input_tensor)
+        print(y)
+
+    et = (time.time() - start) * 1000 / num_iterations
+    print("Model eval time: %.2fms = %.1ffps" % (et, 1000.0 / et))
+
 
 if __name__ == "__main__":
-    datasrc = lmdb_data.LMDB_Data(args.data)
+    datasrc = tar_data.TarData(args.data)
     print("Numer of data items: %d" % datasrc.num_items())
 
     # yt, data = datasrc.get_item()
@@ -548,6 +582,10 @@ if __name__ == "__main__":
     # exit(0)
     model = Model(args.model)
     print(model)
+
+    if args.benchmark:
+        benchmark(datasrc, model)
+        exit(0)
 
     num_errors = 0
     num = datasrc.num_items() if args.num_images == 0 else args.num_images
@@ -567,7 +605,7 @@ if __name__ == "__main__":
         # print(data.shape)
         # model.configure(input_tensor)
         y = model.evaluate(input_tensor)
-        # print(y, yt)
+        print(y, yt)
         if y != yt:
             num_errors += 1
     print("DONE: %d images classified, error rate=%.4f" % (num, 1.0 * num_errors / num))
