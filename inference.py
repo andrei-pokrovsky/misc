@@ -461,7 +461,7 @@ class SoftMax(Layer):
         self.check_truth()
 
 class Model:
-    def __init__(self, json_model_file, load_truth=False):
+    def __init__(self, json_model_file, precision=np.float32, load_truth=False):
         self.layers = []
         
         self.input = None
@@ -480,6 +480,8 @@ class Model:
             if layer["type"] == "View":
                 continue
             layer["baseDir"] = os.path.dirname(json_model_file)
+            layer["precision"] = precision
+
             self.layers.append(self.instantiate_layer(layer))
 
             if load_truth:
@@ -580,7 +582,7 @@ if __name__ == "__main__":
     # yt, data = datasrc.get_item()
     # print(data.shape)
     # exit(0)
-    model = Model(args.model)
+    model = Model(args.model, args.precision)
     print(model)
 
     if args.benchmark:

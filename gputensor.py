@@ -3,7 +3,14 @@ import numpy as np
 from pycuda import gpuarray
 import libcudnn, ctypes
 
+np_2_cudnn_fmt = { 
+    np.dtype(np.float16): libcudnn.cudnnDataType['CUDNN_DATA_HALF'],
+    np.dtype(np.float32): libcudnn.cudnnDataType['CUDNN_DATA_FLOAT'],
+    np.dtype(np.float64): libcudnn.cudnnDataType['CUDNN_DATA_DOUBLE']
+}
 
+# print(np_2_cudnn_fmt[np.float16])
+# exit(0)
 class TensorDesc:
     def __init__(self, shape, dtype, fmt=libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']):
         self.ptr = libcudnn.cudnnCreateTensorDescriptor()
@@ -33,10 +40,12 @@ class GPUTensor(gpuarray.GPUArray):
 
     tensor_format = libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']
 
-    def __init__(self, initializer, dtype=np.float32, shape=None):
+    def __init__(self, initializer, dtype=None, shape=None):
 
         if isinstance(initializer, str):
             npdata = self.load_data(initializer)
+            if dtype and dtype != npdata.dtype:
+                npdata = npdata.astype(dtype, copy=False)
             if shape is not None:
                 npdata = npdata.reshape(shape)
             super().__init__(npdata.shape, dtype=npdata.dtype)
@@ -46,7 +55,10 @@ class GPUTensor(gpuarray.GPUArray):
             super().__init__(initializer, dtype=dtype)
         elif isinstance(initializer, np.ndarray):
             # print("SHAPE:", initializer.shape)
-            if shape is not None or shape == initializer.shape:
+            if dtype and dtype != npdata.dtype:
+                initializer = initializer.astype(dtype)
+
+            if shape is not None and shape != initializer.shape:
                 initializer = initializer.reshape(shape)
             super().__init__(initializer.shape, dtype=initializer.dtype)
             self.set(initializer)
@@ -63,7 +75,9 @@ class GPUTensor(gpuarray.GPUArray):
             raise RuntimeError("Unknown tensor file extension '%s'" % ext) 
 
     def get_cudnn_datatype(self):
-        return libcudnn.cudnnDataType['CUDNN_DATA_FLOAT'] 
+        print("HERE:", type(self.dtype), type(np.dtype(np.float16)))
+        return np_2_cudnn_fmt[self.dtype]
+        # return libcudnn.cudnnDataType['CUDNN_DATA_FLOAT'] 
 
     def get_gpu_voidp(self):
         return ctypes.c_void_p(int(self.gpudata))
