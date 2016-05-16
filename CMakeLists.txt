@@ -12,7 +12,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/toolbox/cmake/Common.cmake)
 include_directories(/usr/local/cuda/samples/common/inc/
     /opt/local/include)
 link_directories(${CUDA_TOOLKIT_ROOT_DIR}/lib)
-cuda_add_executable(test_cublas test_cublas.cc)
+cuda_add_executable(test_cublas test_cublas.cc fp16_emu.cpp)
 target_link_libraries(test_cublas ${CUDA_CUBLAS_LIBRARIES})
 
 cuda_add_executable(cudnn_eval cudnn_eval.cc)

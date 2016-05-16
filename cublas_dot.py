@@ -1,13 +1,17 @@
 import numpy as np
-from scikits.cuda import cublas
+# from scikits.cuda import cublas
+import libcublas
 
 def cublas_gemm(cublas_handle, a, b, c=None):
     assert(len(a.shape) == 2)
     assert(len(b.shape) == 2)
     assert(len(c.shape) == 2)
-    assert(a.dtype == np.float32)
-    assert(b.dtype == np.float32)
-    assert(c.dtype == np.float32)
+    # assert(a.dtype == np.float32)
+    # assert(b.dtype == np.float32)
+    # assert(c.dtype == np.float32)
+    assert(a.dtype in [np.float16, np.float32])
+    assert(a.dtype == b.dtype)
+    assert(a.dtype == c.dtype)
     m = a.shape[0]
     n = b.shape[1]
     k = a.shape[1]
@@ -29,9 +33,14 @@ def cublas_gemm(cublas_handle, a, b, c=None):
 
     opa = 'n'
     opb = 'n'
-
+    print("Hgemm:", a.dtype)
     # print("DATA:", b.ptr, a.ptr, c.ptr)
-    cublas.cublasSgemm(cublas_handle, opb, opa, n, m, k, 1.0, b.gpudata, ldb, a.gpudata, lda, 0.0, c.gpudata, ldc)
+    if a.dtype == np.float32:
+        libcublas.cublasSgemm(cublas_handle, opb, opa, n, m, k, 1.0, b.gpudata, ldb, a.gpudata, lda, 0.0, c.gpudata, ldc)
+    else:
+        # assert(False)
+    
+        libcublas.cublasHgemm(cublas_handle, opb, opa, n, m, k, 1.0, b.gpudata, ldb, a.gpudata, lda, 0.0, c.gpudata, ldc)
 
     # ch = c.get()
     # print(ch)

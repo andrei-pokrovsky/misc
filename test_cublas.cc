@@ -60,6 +60,8 @@
 #include <helper_functions.h>
 #include <helper_cuda.h>
 
+#include "fp16_emu.h"
+
 #ifndef min
 #define min(a,b) ((a < b) ? a : b)
 #endif
@@ -257,6 +259,18 @@ int matrixMultiply(int argc, char **argv, int devID, sMatrixSize &matrix_size)
     checkCudaErrors(cudaMemcpy(d_B, h_B, mem_size_B, cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMalloc((void **) &d_C, mem_size_C));
 
+    
+    // allocate device memory
+    half *d_A16, *d_B16, *d_C16;
+    unsigned int size_C16 = matrix_size.uiWC * matrix_size.uiHC;
+    unsigned int mem_size_C16 = sizeof(short) * size_C16;
+
+    checkCudaErrors(cudaMalloc((void **) &d_A16, mem_size_A));
+    checkCudaErrors(cudaMalloc((void **) &d_B16, mem_size_B));
+    checkCudaErrors(cudaMemcpy(d_A16, h_A, mem_size_A, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(d_B16, h_B, mem_size_B, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc((void **) &d_C16, mem_size_C16));
+
     // setup execution parameters
     dim3 threads(block_size, block_size);
     dim3 grid(matrix_size.uiWC / threads.x, matrix_size.uiHC / threads.y);
@@ -271,6 +285,8 @@ int matrixMultiply(int argc, char **argv, int devID, sMatrixSize &matrix_size)
     {
         const float alpha = 1.0f;
         const float beta  = 0.0f;
+        const __half alpha_fp16 = cpu_float2half_rn(alpha);
+        const __half beta_fp16  = cpu_float2half_rn(beta);
         cublasHandle_t handle;
         cudaEvent_t start, stop;
 
@@ -278,6 +294,8 @@ int matrixMultiply(int argc, char **argv, int devID, sMatrixSize &matrix_size)
 
         //Perform warmup operation with cublas
         checkCudaErrors(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, matrix_size.uiWB, matrix_size.uiHA, matrix_size.uiWA, &alpha, d_B, matrix_size.uiWB, d_A, matrix_size.uiWA, &beta, d_C, matrix_size.uiWB));
+
+        checkCudaErrors(cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, matrix_size.uiWB, matrix_size.uiHA, matrix_size.uiWA, &alpha_fp16, d_B16, matrix_size.uiWB, d_A16, matrix_size.uiWA, &beta_fp16, d_C16, matrix_size.uiWB));
 
         // Allocate CUDA events that we'll use for timing
         checkCudaErrors(cudaEventCreate(&start));

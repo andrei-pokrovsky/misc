@@ -16,6 +16,7 @@ import libcudnn, ctypes
 
 from pycuda import gpuarray
 from gputensor import GPUTensor
+import gputensor
 
 parser = argparse.ArgumentParser(description='Postprocess hypercap runs')
 
@@ -32,15 +33,6 @@ parser.add_argument("--benchmark", default=False, action='store_true',
 
 args = parser.parse_args()
 
-tensor_format = libcudnn.cudnnTensorFormat['CUDNN_TENSOR_NCHW']
-data_type = libcudnn.cudnnDataType['CUDNN_DATA_FLOAT']
-
-np_2_cudnn_fmt = { 
-    np.float16: libcudnn.cudnnDataType['CUDNN_DATA_HALF'],
-    np.float32: libcudnn.cudnnDataType['CUDNN_DATA_FLOAT'],
-    np.float64: libcudnn.cudnnDataType['CUDNN_DATA_DOUBLE']
-}
-
 class Layer:
     def __init__(self, name=None):
         self.name = name
@@ -53,13 +45,17 @@ class Layer:
         raise NotImplementedError
 
     def check_truth(self, atol=0.0005):
-        if not self.truth:
+        if self.truth is None:
             return
         truth = self.truth[0]
-        output = self.output[0]
+        output = self.output[0].get()
         if output.shape != truth.shape:
-            output.reshape(truth.shape)
+            output = output.reshape(truth.shape)
 
+        print("DT:", output.dtype)
+        if output.dtype == np.float16:
+            atol = 0.01
+        # print("TYPES:", type(truth), type(output))
         if not np.allclose(truth, output, atol=atol):
             print("%s COMPARE FAILED:" % self.name)
             print(truth.shape)
@@ -67,12 +63,18 @@ class Layer:
             print(truth[0][0])
             print(output[0][0])
             print("MAX DIFF:", np.max(np.abs(truth - output)))
-            exit(1)
+            assert(False)
         else:
             print("%s COMPARED OK" % self.name)
     
-    def load_tensor(self, config, index):
-        return GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][index]))
+    def load_tensor(self, config, index, dtype=None, shape=None):
+        filename = os.path.join(config["baseDir"], config["parameterFiles"][index])
+
+        if dtype is None:
+            dtype = config["dtype"]
+
+        return GPUTensor(filename, dtype, shape)
+
 
 
     def __str__(self):
@@ -107,7 +109,7 @@ class Convolution(SlidingLayer):
         super().__init__(config, name)
         self.output = None
 
-        self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]))
+        self.W = self.load_tensor(config, 0)
 
         self.alpha = 1.0
         self.beta = 0.0
@@ -118,8 +120,7 @@ class Convolution(SlidingLayer):
         self.num_filter_maps = self.W.shape[0]
         self.num_filter_channels = self.W.shape[1]
 
-        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]), 
-                shape=(1, self.num_filter_maps, 1, 1))
+        self.bias = self.load_tensor(config, 1, shape=(1, self.num_filter_maps, 1, 1))
 
         # assert(self.bias.shape[0] == self.num_filter_maps)
         # self.bias = self.bias.reshape((1, self.num_filter_maps, 1, 1))
@@ -127,7 +128,9 @@ class Convolution(SlidingLayer):
         self.b_desc = self.bias.get_cudnn_tensor_desc()
 
         self.filt_desc = libcudnn.cudnnCreateFilterDescriptor()
-        libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, data_type, self.num_filter_maps,
+        print("FILT:", self.W.dtype, gputensor.np_2_cudnn_dtype[self.W.dtype])
+        libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, 
+                gputensor.np_2_cudnn_dtype[self.W.dtype], self.num_filter_maps,
                 self.num_filter_channels, self.kH, self.kW)
 
         # print("B:", self.bias.shape)
@@ -156,7 +159,9 @@ class Convolution(SlidingLayer):
         out_width  = int((1.0 * in_width + 2*self.padW - self.kW) / self.dW + 1);
         out_height = int((1.0 * in_height + 2*self.padH - self.kH) / self.dH + 1);
 
-        self.output = GPUTensor((in_images, self.num_filter_maps, out_height, out_width))
+        self.output = GPUTensor((in_images, self.num_filter_maps, out_height, out_width),
+                input.dtype)
+        # print("ONCV:", input.dtype, self.output.dtype)
         # print("Convolution::configure: output shape =", self.output.shape)
    
         # initialize cudnn descriptors
@@ -239,7 +244,7 @@ class Pooling(SlidingLayer):
         out_width  = int((math.floor(1.0 * in_width - self.kW + 2*self.padW) / self.dW) + 1)
         out_height = int((math.floor(1.0 * in_height - self.kH + 2*self.padH) / self.dH) + 1)
 
-        self.output = GPUTensor( (in_images, in_channels, out_height, out_width) ) 
+        self.output = GPUTensor( (in_images, in_channels, out_height, out_width), input.dtype ) 
 
         if self.pool_desc:
             libcudnn.cudnnDestroyPoolingDescriptor(self.pool_desc)
@@ -323,13 +328,14 @@ class Dropout(Layer):
 
 class BatchNormalization(Layer):
     def __init__(self, config):
-        super().__init__("Linear")
+        super().__init__("BatchNormalization")
 
         assert(config["affine"])
         
         self.eps = config["eps"]
 
         variance = np.load(os.path.join(config["baseDir"], config["parameterFiles"][3]))
+        #variance = self.load_tensor(config, 3, dtype=np.float32)
         nelem = variance.shape[0]
 
         if config["varianceFormat"] == "variance" and libcudnn.cudnnGetVersion() < 5000:
@@ -337,19 +343,19 @@ class BatchNormalization(Layer):
             variance += self.eps
             variance = np.reciprocal(np.sqrt(variance))
             
-        self.variance = GPUTensor(variance, shape=(1, nelem, 1, 1))
+        self.variance = GPUTensor(variance, dtype=np.float32, shape=(1, nelem, 1, 1))
 
-        self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]), shape=(1, nelem, 1, 1))
-        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]), shape=(1, nelem, 1, 1)) 
+        self.W = self.load_tensor(config, 0, shape=(1, nelem, 1, 1))
+        self.bias = self.load_tensor(config, 1, shape=(1, nelem, 1, 1))
                 # shape=(1, self.W.shape[0], 1, 1))
-        self.average = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][2]), shape=(1, nelem, 1, 1))
+        self.average = self.load_tensor(config, 2, dtype=np.float32, shape=(1, nelem, 1, 1))
 
-        self.param_desc = self.W.get_cudnn_tensor_desc()
+        self.param_desc = self.average.get_cudnn_tensor_desc()
         self.in_desc = None
         self.out_desc = None
 
     def configure(self, input):
-        self.output = GPUTensor(input.shape)
+        self.output = GPUTensor(input.shape, input.dtype)
 
         if self.in_desc:
             libcudnn.cudnnDestroyTensorDescriptor(self.in_desc.ptr)
@@ -363,6 +369,11 @@ class BatchNormalization(Layer):
     def fprop(self, input):
         # The input transformation performed by this function is defined as: 
         # y := alpha*y + beta *(bnScale * (x-estimatedMean)/sqrt(epsilon + estimatedVariance)+bnBias)
+        # print("IN:", self.in_desc)
+        # print("OUT:", self.out_desc)
+        # print("PARAM:", self.param_desc)
+        # print("EPSILON:", self.eps)
+        # print("VARP:", self.variance.get_gpu_voidp())
         libcudnn.cudnnBatchNormalizationForwardInference(context.cudnn, 
                 libcudnn.cudnnBatchNormMode['CUDNN_BATCHNORM_SPATIAL'],
                 1.0, 0.0, self.in_desc.ptr, input.get_gpu_voidp(),
@@ -379,9 +390,8 @@ class Linear(Layer):
     def __init__(self, config):
         super().__init__("Linear")
 
-        self.W = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][0]))
-        self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]), 
-                shape=(1, self.W.shape[0], 1, 1))
+        self.W = self.load_tensor(config, 0)
+        self.bias = self.load_tensor(config, 1, shape=(1, self.W.shape[0], 1, 1))
         # self.bias = GPUTensor(os.path.join(config["baseDir"], config["parameterFiles"][1]))
         self.b_desc = self.bias.get_cudnn_tensor_desc()
         # print(self.W.shape)
@@ -402,6 +412,7 @@ class Linear(Layer):
             print("OUTPUT TRUTH SHAPE:", self.truth.shape, self.output.shape)
 
     def fprop(self, input):
+        print("PAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
         input_2d = input.reshape((self.W.shape[1], 1)) 
         output_2d = self.output.reshape(self.W.shape[0], 1)
         # print(input_2d.flags.c_contiguous)
@@ -417,10 +428,10 @@ class Linear(Layer):
         # print("B:", input.shape, input.strides, input.size, input.mem_size, str(input.flags.c_contiguous))
         # print("B':", input_2d.shape, input_2d.strides, input_2d.size, input_2d.mem_size, str(input_2d.flags.c_contiguous))
         # print("C:", output_2d.shape, output_2d.strides, output_2d.size, output_2d.mem_size, str(output_2d.flags.c_contiguous))
-        # print("Linear::fprop()", self.W.shape, input_2d.shape, output_2d.shape)
+        print("Linear::fprop()", self.W.shape, input_2d.shape, output_2d.shape)
         cublas_dot.cublas_gemm(context.cublas, self.W, input_2d, output_2d)
 
-        # print("Linear::fprop()", self.output.shape)
+        print("Linear::fprop()", self.output.shape)
         libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
                 1.0, self.output_desc.ptr, self.output.get_gpu_voidp())
 
@@ -436,7 +447,7 @@ class SoftMax(Layer):
         LOG = 2
 
     def __init__(self, mode):
-        super().__init__()
+        super().__init__("SoftMax")
         self.mode = mode
 
     def __str__(self):
@@ -461,10 +472,11 @@ class SoftMax(Layer):
         self.check_truth()
 
 class Model:
-    def __init__(self, json_model_file, precision=np.float32, load_truth=False):
+    def __init__(self, json_model_file, dtype=np.float32, load_truth=False):
         self.layers = []
         
         self.input = None
+        self.dtype = dtype
         self.configured_shape = None
 
         with open(json_model_file) as f:
@@ -480,7 +492,7 @@ class Model:
             if layer["type"] == "View":
                 continue
             layer["baseDir"] = os.path.dirname(json_model_file)
-            layer["precision"] = precision
+            layer["dtype"] = dtype
 
             self.layers.append(self.instantiate_layer(layer))
 
@@ -574,6 +586,14 @@ def benchmark(datasrc, model):
     et = (time.time() - start) * 1000 / num_iterations
     print("Model eval time: %.2fms = %.1ffps" % (et, 1000.0 / et))
 
+def str_to_np_dtype(s):
+    if s == 'fp16':
+        return np.float16
+    elif s == 'fp32':
+        return np.float32
+    else:
+        print("unsupported precision '%s'" % s)
+        assert(False)
 
 if __name__ == "__main__":
     datasrc = tar_data.TarData(args.data)
@@ -582,9 +602,10 @@ if __name__ == "__main__":
     # yt, data = datasrc.get_item()
     # print(data.shape)
     # exit(0)
-    model = Model(args.model, args.precision)
+    model = Model(args.model, str_to_np_dtype(args.precision), load_truth=True)
     print(model)
 
+    # exit(0)
     if args.benchmark:
         benchmark(datasrc, model)
         exit(0)
@@ -592,12 +613,20 @@ if __name__ == "__main__":
     num_errors = 0
     num = datasrc.num_items() if args.num_images == 0 else args.num_images
 
+    input_dtype = model.dtype
+
+    inputs = np.load("truth/input.npy")
+    results = [["n01986214","n04252225" ],
+               ["n03938244","n02840245"],
+               ["n01644900","n01770393"],
+               ["n04019541","n04019541"]]
+
     for i in range(num):
         yt, data = datasrc.get_item()
-        data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
+        data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(input_dtype)
         data = model.normalize(data)
         # yt = results[i][0]
-        # data = np.expand_dims(inputs[i], 0)
+        data = np.expand_dims(inputs[i], 0).astype(input_dtype)
         # print(data.shape, data.dtype)
         # print(data2.shape, data2.dtype)
         # print(np.allclose(data,data2))

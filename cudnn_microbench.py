@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import pycuda.autoinit
+mport pycuda.autoinit
 import pycuda.driver as drv
 from pycuda import gpuarray
 import libcudnn, ctypes
@@ -75,8 +75,8 @@ def benchmark_conv(kw, kh, bsz):
 
     # Output tensor
     Y = gpuarray.empty((n_input, filters_out, height_output, width_output), np.float32)
-    Y_desc = libcudnn.cudnnCreateTensorDescriptor()
-    libcudnn.cudnnSetTensor4dDescriptor(Y_desc, tensor_format, data_type, n_input,
+    y_desc = libcudnn.cudnncreatetensordescriptor()
+    libcudnn.cudnnsettensor4ddescriptor(y_desc, tensor_format, data_type, n_input,
         filters_out, height_output, width_output)
 
     # Get pointers to GPU memory

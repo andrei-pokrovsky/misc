@@ -3,11 +3,15 @@ import numpy as np
 from pycuda import gpuarray
 import libcudnn, ctypes
 
-np_2_cudnn_fmt = { 
+np_2_cudnn_dtype = { 
     np.dtype(np.float16): libcudnn.cudnnDataType['CUDNN_DATA_HALF'],
     np.dtype(np.float32): libcudnn.cudnnDataType['CUDNN_DATA_FLOAT'],
     np.dtype(np.float64): libcudnn.cudnnDataType['CUDNN_DATA_DOUBLE']
 }
+
+cudnn_dtype_to_str = { 0: 'fp32',
+                       1: 'fp64',
+                       2: 'fp16' }
 
 # print(np_2_cudnn_fmt[np.float16])
 # exit(0)
@@ -22,8 +26,9 @@ class TensorDesc:
     def get(self):
         return libcudnn.cudnnGetTensor4dDescriptor(self.ptr)
     def __str__(self):
-        elems = self.get() 
-        return "Tensor: dtype=%s, shape=(%d,%d,%d,%d), strides=(%d,%d,%d,%d)" % elems
+        elems = list(self.get())
+        elems[0] = cudnn_dtype_to_str[elems[0]]
+        return "Tensor: dtype=%s, shape=(%d,%d,%d,%d), strides=(%d,%d,%d,%d)" % tuple(elems)
 
     @property
     def shape(self):
@@ -42,20 +47,28 @@ class GPUTensor(gpuarray.GPUArray):
 
     def __init__(self, initializer, dtype=None, shape=None):
 
+        if dtype is not None:
+            assert(np.issctype(dtype))
+        if shape is not None:
+            assert(isinstance(shape, tuple))
+
+
         if isinstance(initializer, str):
+
+            # treat initializer as a filename to load tensor data from
             npdata = self.load_data(initializer)
-            if dtype and dtype != npdata.dtype:
+            if dtype != None and dtype != npdata.dtype:
                 npdata = npdata.astype(dtype, copy=False)
-            if shape is not None:
+            if shape != None:
                 npdata = npdata.reshape(shape)
             super().__init__(npdata.shape, dtype=npdata.dtype)
             self.set(npdata)
         elif isinstance(initializer, tuple):
             # print("GPUTensor(shape=", initializer)
-            super().__init__(initializer, dtype=dtype)
+            super().__init__(initializer, dtype=np.float32 if dtype is None else dtype)
         elif isinstance(initializer, np.ndarray):
             # print("SHAPE:", initializer.shape)
-            if dtype and dtype != npdata.dtype:
+            if dtype and dtype != initializer.dtype:
                 initializer = initializer.astype(dtype)
 
             if shape is not None and shape != initializer.shape:
@@ -75,8 +88,8 @@ class GPUTensor(gpuarray.GPUArray):
             raise RuntimeError("Unknown tensor file extension '%s'" % ext) 
 
     def get_cudnn_datatype(self):
-        print("HERE:", type(self.dtype), type(np.dtype(np.float16)))
-        return np_2_cudnn_fmt[self.dtype]
+        # print("HERE:", type(self.dtype), type(np.dtype(np.float16)))
+        return np_2_cudnn_dtype[self.dtype]
         # return libcudnn.cudnnDataType['CUDNN_DATA_FLOAT'] 
 
     def get_gpu_voidp(self):

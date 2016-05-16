@@ -10,6 +10,9 @@ import context
 
 # print(context.get_device().name())
 
+
+test_dtype = np.float16
+
 def gpu_tensor_gemm(handle, a, b):
     c = gpuarray.GPUArray((a.shape[0], b.shape[1]), dtype=a.dtype)
     cublas_dot.cublas_gemm(handle, a, b, c)
@@ -45,34 +48,38 @@ def test_saved():
 
 def test_ranges():
         
-    for i in range(100):
+    for i in range(1):
 
         m = np.random.randint(1,1024)
         k = np.random.randint(1,1024)
         n = np.random.randint(1,1024)
 
-        ah = np.random.rand(m, k).astype(np.float32)
-        bh = np.random.rand(k, n).astype(np.float32)
+        # m = 2
+        # k = 2
+        # n = 2
+        ah = np.random.rand(m, k).astype(test_dtype)
+        bh = np.random.rand(k, n).astype(test_dtype)
 
         # an = np.array([[1,2],[3,4]], dtype=np.float32)
         # bn = np.array([[1,3],[2,1]], dtype=np.float32)
         ch = np.dot(ah, bh)
+        print(ah.dtype)
         # print("C:\n", ch)
 
         a = gpuarray.to_gpu(ah)
         b = gpuarray.to_gpu(bh)
-        c = gpu_tensor_gemm(cbh, a, b)
+        c = gpu_tensor_gemm(context.cublas, a, b)
 
         ch2 = c.get()
         # print(ch2)
-        eq = np.allclose(ch, ch2)
+        eq = np.allclose(ch, ch2, atol=0.00001)
         if not eq:
             print("%dx%d * %dx%d => %dx%d : %s" % (m, k, k, n, m, n, eq)) 
             print("C1 =", ch)
             print("C2 =", ch2)
 
 if __name__ == "__main__":
-    test_saved()
+    test_ranges()
  # cublas.cublasDestroy(cbh)
 
 
