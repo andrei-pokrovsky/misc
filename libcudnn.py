@@ -598,54 +598,54 @@ def cudnnAddTensor(handle, alpha, biasDesc, biasData, beta, srcDestDesc, srcDest
                                       srcDestDesc, srcDestData)
     cudnnCheckStatus(status)
 
-_libcudnn.cudnnAddTensor_v2.restype = int
-_libcudnn.cudnnAddTensor_v2.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
-                                       ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
-                                       ctypes.c_void_p, ctypes.c_void_p]
-def cudnnAddTensor_v2(handle, mode, alpha, biasDesc, biasData, beta, srcDestDesc, srcDestData):
-    """"
-    Tensor Bias addition : srcDest = alpha * bias + beta * srcDestDesc.
+# _libcudnn.cudnnAddTensor_v2.restype = int
+# _libcudnn.cudnnAddTensor_v2.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
+                                       # ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                                       # ctypes.c_void_p, ctypes.c_void_p]
+# def cudnnAddTensor_v2(handle, mode, alpha, biasDesc, biasData, beta, srcDestDesc, srcDestData):
+    # """"
+    # Tensor Bias addition : srcDest = alpha * bias + beta * srcDestDesc.
 
-    This function adds the scaled values of one tensor to another tensor. The mode parameter
-    can be used to select different ways of performing the scaled addition. The amount
-    of data described by the biasDesc descriptor must match exactly the amount of data
-    needed to perform the addition.
+    # This function adds the scaled values of one tensor to another tensor. The mode parameter
+    # can be used to select different ways of performing the scaled addition. The amount
+    # of data described by the biasDesc descriptor must match exactly the amount of data
+    # needed to perform the addition.
 
-    Parameters
-    ----------
-    handle : cudnnHandle
-        Handle to a cuDNN context.
-    mode : cudnnAddMode
-        Addition mode that describes how the addition is performed
-    alpha : float
-        Scalar factor to be applied to every data element of the bias tensor before it is added
-        to the output tensor.
-    biasDesc : cudnnTensorDescriptor
-        Handle to a previoulsy initialized tensor descriptor.
-    biasData : void_p
-        Pointer to data of the tensor described by biasDesc.
-    beta: float
-        Scaling factor which is applied on every element of the output tensor prior to adding
-        the result of the operation. Note that if beta is zero, the output is not read and can
-        contain any uninitialized data (including Nan numbers).
-    srcDestDesc : cudnnTensorDescriptor
-        Handle to a previoulsy initialized tensor descriptor.
-    srcDestData : void_p
-        Pointer to data of the tensor described by srcDestDesc.
-    """
+    # Parameters
+    # ----------
+    # handle : cudnnHandle
+        # Handle to a cuDNN context.
+    # mode : cudnnAddMode
+        # Addition mode that describes how the addition is performed
+    # alpha : float
+        # Scalar factor to be applied to every data element of the bias tensor before it is added
+        # to the output tensor.
+    # biasDesc : cudnnTensorDescriptor
+        # Handle to a previoulsy initialized tensor descriptor.
+    # biasData : void_p
+        # Pointer to data of the tensor described by biasDesc.
+    # beta: float
+        # Scaling factor which is applied on every element of the output tensor prior to adding
+        # the result of the operation. Note that if beta is zero, the output is not read and can
+        # contain any uninitialized data (including Nan numbers).
+    # srcDestDesc : cudnnTensorDescriptor
+        # Handle to a previoulsy initialized tensor descriptor.
+    # srcDestData : void_p
+        # Pointer to data of the tensor described by srcDestDesc.
+    # """
 
-    dataType, _, _, _, _, _, _, _, _ = cudnnGetTensor4dDescriptor(srcDestDesc)
-    if dataType == cudnnDataType['CUDNN_DATA_DOUBLE']:
-        alphaRef = ctypes.byref(ctypes.c_double(alpha))
-        betaRef = ctypes.byref(ctypes.c_double(beta))
-    else:
-        alphaRef = ctypes.byref(ctypes.c_float(alpha))
-        betaRef = ctypes.byref(ctypes.c_float(beta))
+    # dataType, _, _, _, _, _, _, _, _ = cudnnGetTensor4dDescriptor(srcDestDesc)
+    # if dataType == cudnnDataType['CUDNN_DATA_DOUBLE']:
+        # alphaRef = ctypes.byref(ctypes.c_double(alpha))
+        # betaRef = ctypes.byref(ctypes.c_double(beta))
+    # else:
+        # alphaRef = ctypes.byref(ctypes.c_float(alpha))
+        # betaRef = ctypes.byref(ctypes.c_float(beta))
 
-    status = _libcudnn.cudnnAddTensor_v2(handle, mode, alphaRef, biasDesc,
-                                        biasData, betaRef,
-                                        srcDestDesc, srcDestData)
-    cudnnCheckStatus(status)
+    # status = _libcudnn.cudnnAddTensor_v2(handle, mode, alphaRef, biasDesc,
+                                        # biasData, betaRef,
+                                        # srcDestDesc, srcDestData)
+    # cudnnCheckStatus(status)
 
 _libcudnn.cudnnSetTensor.restype = int
 _libcudnn.cudnnSetTensor.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
