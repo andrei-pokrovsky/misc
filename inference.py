@@ -38,8 +38,23 @@ class Layer:
         self.name = name
         self.truth = None
 
+        # self.num_evaluations = 0
+        # self.accum_gpu_time = 0
+
+        # self.start = None
+        # self.start = drv.Event()
+        # self.stop = drv.Event()
+
     def configure(self, input):
         pass
+
+    def _fprop(self, input):
+        if self.start is not None:
+            self.start.record()
+        self._fprop(input)
+        self.stop.record()
+        self.stop.synchronize()
+        self.accum_gpu_time += self.stop.time_since(self.start)
 
     def fprop(self, inputs, inference=False):
         raise NotImplementedError
@@ -135,6 +150,7 @@ class Convolution(SlidingLayer):
 
         self.filt_desc = libcudnn.cudnnCreateFilterDescriptor()
         print("FILT:", self.W.dtype, gputensor.np_2_cudnn_dtype[self.W.dtype])
+        print("FILT:", self.W.shape, self.num_filter_maps, self.num_filter_channels, self.kH, self.kW)
         libcudnn.cudnnSetFilter4dDescriptor(self.filt_desc, 
                 gputensor.np_2_cudnn_dtype[self.W.dtype], self.num_filter_maps,
                 self.num_filter_channels, self.kH, self.kW)
@@ -191,11 +207,13 @@ class Convolution(SlidingLayer):
         self.algo = libcudnn.cudnnGetConvolutionForwardAlgorithm(context.cudnn, self.in_desc.ptr,
             self.filt_desc, self.conv_desc, self.out_desc.ptr, self.convolution_fwd_pref, 0)
  
-        print("Convolution::configure: algo=%s" % str(self.algo))
+        print("Convolution::configure: algo=%s" % str(self.algo.value))
 
         self.ws_size = libcudnn.cudnnGetConvolutionForwardWorkspaceSize(context.cudnn, 
                 self.in_desc.ptr, self.filt_desc, self.conv_desc, self.out_desc.ptr, self.algo)
         self.ws_ptr  = drv.mem_alloc(self.ws_size.value) if self.ws_size.value > 0 else 0
+
+        print("Convolution::configure: workspace size=%d" % self.ws_size.value)
 
     def fprop(self, input):
 
@@ -203,6 +221,7 @@ class Convolution(SlidingLayer):
         
         ws_data = ctypes.c_void_p(int(self.ws_ptr))
 
+        self.start.record()
         libcudnn.cudnnConvolutionForward(context.cudnn, self.alpha, 
                 self.in_desc.ptr, input.get_gpu_voidp(),
                 self.filt_desc, self.W.get_gpu_voidp(), 
