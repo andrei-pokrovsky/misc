@@ -4309,8 +4309,11 @@ def cublasHgemm(handle, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C,
     """
 
     alpha16 = np.array([alpha], dtype=np.float16).view(np.int16)[0]
-    beta16 = np.array([alpha], dtype=np.float16).view(np.int16)[0]
+    beta16 = np.array([beta], dtype=np.float16).view(np.int16)[0]
 
+    # alpha16 = 0
+    # beta16 = 0
+    # print("alpha=%d, beta=%d" % (alpha16, beta16))
     status = _libcublas.cublasHgemm(handle,
                                        _CUBLAS_OP[transa],
                                        _CUBLAS_OP[transb], m, n, k,

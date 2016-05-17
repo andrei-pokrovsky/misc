@@ -54,14 +54,20 @@ class Layer:
 
         print("DT:", output.dtype)
         if output.dtype == np.float16:
-            atol = 0.01
+            atol = 0.015
+            atol = 0.15
         # print("TYPES:", type(truth), type(output))
         if not np.allclose(truth, output, atol=atol):
             print("%s COMPARE FAILED:" % self.name)
             print(truth.shape)
             print(output.shape)
-            print(truth[0][0])
-            print(output[0][0])
+            if truth.ndim > 1:
+                print(truth[0][0])
+                print(output[0][0])
+            else:
+                print(truth[0:10])
+                print(output[0:10])
+
             print("MAX DIFF:", np.max(np.abs(truth - output)))
             assert(False)
         else:
@@ -185,7 +191,7 @@ class Convolution(SlidingLayer):
         self.algo = libcudnn.cudnnGetConvolutionForwardAlgorithm(context.cudnn, self.in_desc.ptr,
             self.filt_desc, self.conv_desc, self.out_desc.ptr, self.convolution_fwd_pref, 0)
  
-        # print("Convolution::configure: algo=%s" % str(self.algo))
+        print("Convolution::configure: algo=%s" % str(self.algo))
 
         self.ws_size = libcudnn.cudnnGetConvolutionForwardWorkspaceSize(context.cudnn, 
                 self.in_desc.ptr, self.filt_desc, self.conv_desc, self.out_desc.ptr, self.algo)
@@ -345,8 +351,8 @@ class BatchNormalization(Layer):
             
         self.variance = GPUTensor(variance, dtype=np.float32, shape=(1, nelem, 1, 1))
 
-        self.W = self.load_tensor(config, 0, shape=(1, nelem, 1, 1))
-        self.bias = self.load_tensor(config, 1, shape=(1, nelem, 1, 1))
+        self.W = self.load_tensor(config, 0, dtype=np.float32, shape=(1, nelem, 1, 1))
+        self.bias = self.load_tensor(config, 1, dtype=np.float32, shape=(1, nelem, 1, 1))
                 # shape=(1, self.W.shape[0], 1, 1))
         self.average = self.load_tensor(config, 2, dtype=np.float32, shape=(1, nelem, 1, 1))
 
@@ -412,26 +418,26 @@ class Linear(Layer):
             print("OUTPUT TRUTH SHAPE:", self.truth.shape, self.output.shape)
 
     def fprop(self, input):
-        print("PAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        # print("PAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
         input_2d = input.reshape((self.W.shape[1], 1)) 
         output_2d = self.output.reshape(self.W.shape[0], 1)
         # print(input_2d.flags.c_contiguous)
         # print(output_2d.flags.c_contiguous)
 
         # test_cublas()
+        # np.save("a16.npy", self.W.get())
+        # np.save("b16.npy", input_2d.get())
         # exit(0)
-        # np.save("a.npy", self.W.get())
-        # np.save("b.npy", input_2d.get())
 
         # ad = self.W
         # print("A:", ad.shape, ad.strides, ad.size, ad.mem_size, str(ad.flags.c_contiguous))
         # print("B:", input.shape, input.strides, input.size, input.mem_size, str(input.flags.c_contiguous))
         # print("B':", input_2d.shape, input_2d.strides, input_2d.size, input_2d.mem_size, str(input_2d.flags.c_contiguous))
         # print("C:", output_2d.shape, output_2d.strides, output_2d.size, output_2d.mem_size, str(output_2d.flags.c_contiguous))
-        print("Linear::fprop()", self.W.shape, input_2d.shape, output_2d.shape)
+        # print("Linear::fprop()", self.W.shape, input_2d.shape, output_2d.shape)
         cublas_dot.cublas_gemm(context.cublas, self.W, input_2d, output_2d)
 
-        print("Linear::fprop()", self.output.shape)
+        # print("Linear::fprop()", self.output.shape)
         libcudnn.cudnnAddTensor(context.cudnn, 1.0, self.b_desc.ptr, self.bias.get_gpu_voidp(),
                 1.0, self.output_desc.ptr, self.output.get_gpu_voidp())
 
@@ -571,17 +577,23 @@ def benchmark(datasrc, model):
     print("Data load time: %.2fms" % ((time.time() - start) * 1000.0))
 
     start = time.time()
-    data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(np.float32)
+    data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(model.dtype)
     data = model.normalize(data)
     print("Data prep time: %.2fms" % ((time.time() - start) * 1000.0))
 
     input_tensor = GPUTensor(data)
-    y = model.evaluate(input_tensor)
+    # warmup...
+    for i in range(1):
+         model.evaluate(input_tensor)
     start = time.time()
-    num_iterations = 10
+    num_iterations = 100
+    print("Timing %d iterations..." % num_iterations)
     for i in range(num_iterations):
+        if i == num_iterations - 1:
+            drv.start_profiler()
         y = model.evaluate(input_tensor)
         print(y)
+    drv.stop_profiler()
 
     et = (time.time() - start) * 1000 / num_iterations
     print("Model eval time: %.2fms = %.1ffps" % (et, 1000.0 / et))
@@ -602,7 +614,7 @@ if __name__ == "__main__":
     # yt, data = datasrc.get_item()
     # print(data.shape)
     # exit(0)
-    model = Model(args.model, str_to_np_dtype(args.precision), load_truth=True)
+    model = Model(args.model, str_to_np_dtype(args.precision), load_truth=False)
     print(model)
 
     # exit(0)
@@ -613,20 +625,18 @@ if __name__ == "__main__":
     num_errors = 0
     num = datasrc.num_items() if args.num_images == 0 else args.num_images
 
-    input_dtype = model.dtype
-
-    inputs = np.load("truth/input.npy")
-    results = [["n01986214","n04252225" ],
-               ["n03938244","n02840245"],
-               ["n01644900","n01770393"],
-               ["n04019541","n04019541"]]
+    # inputs = np.load("truth/input.npy")
+    # results = [["n01986214","n04252225" ],
+               # ["n03938244","n02840245"],
+               # ["n01644900","n01770393"],
+               # ["n04019541","n04019541"]]
 
     for i in range(num):
         yt, data = datasrc.get_item()
-        data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(input_dtype)
+        data = np.ascontiguousarray(np.expand_dims(np.rollaxis(data,2), 0)).astype(model.dtype)
         data = model.normalize(data)
         # yt = results[i][0]
-        data = np.expand_dims(inputs[i], 0).astype(input_dtype)
+        # data = np.expand_dims(inputs[i], 0).astype(input_dtype)
         # print(data.shape, data.dtype)
         # print(data2.shape, data2.dtype)
         # print(np.allclose(data,data2))

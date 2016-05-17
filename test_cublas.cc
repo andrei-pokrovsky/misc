@@ -287,6 +287,7 @@ int matrixMultiply(int argc, char **argv, int devID, sMatrixSize &matrix_size)
         const float beta  = 0.0f;
         const __half alpha_fp16 = cpu_float2half_rn(alpha);
         const __half beta_fp16  = cpu_float2half_rn(beta);
+        printf("1.0 = %d\n", alpha_fp16);
         cublasHandle_t handle;
         cudaEvent_t start, stop;
 

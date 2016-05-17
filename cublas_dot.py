@@ -33,14 +33,16 @@ def cublas_gemm(cublas_handle, a, b, c=None):
 
     opa = 'n'
     opb = 'n'
-    print("Hgemm:", a.dtype)
+    # print("<T>gemm:", a.dtype)
     # print("DATA:", b.ptr, a.ptr, c.ptr)
+    alpha = 1.0
+    beta = 0.0
     if a.dtype == np.float32:
         libcublas.cublasSgemm(cublas_handle, opb, opa, n, m, k, 1.0, b.gpudata, ldb, a.gpudata, lda, 0.0, c.gpudata, ldc)
     else:
         # assert(False)
     
-        libcublas.cublasHgemm(cublas_handle, opb, opa, n, m, k, 1.0, b.gpudata, ldb, a.gpudata, lda, 0.0, c.gpudata, ldc)
+        libcublas.cublasHgemm(cublas_handle, opb, opa, n, m, k, alpha, b.gpudata, ldb, a.gpudata, lda, beta, c.gpudata, ldc)
 
     # ch = c.get()
     # print(ch)

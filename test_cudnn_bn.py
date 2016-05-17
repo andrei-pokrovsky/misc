@@ -17,7 +17,7 @@ print("CUDNN Version: %d" % libcudnn.cudnnGetVersion())
 x = GPUTensor(xh)
 y = GPUTensor(xh.shape, dtype=dt)
 
-pdt = np.float16
+pdt = np.float32
 
 w = GPUTensor(np.ones(1).reshape(1,1,1,1), dtype=pdt)
 bias = GPUTensor(np.zeros(1).reshape(1,1,1,1), dtype=pdt)
